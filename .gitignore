@@ -1,0 +1,77 @@
+# Model weights (local GGUF / checkpoints; do not commit)
+*.gguf
+*.ggml
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.pickle
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# C / CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+CTestCostData.txt
+LastTest.log
+Testing/
+Makefile
+compile_commands.json
+*.o
+*.a
+*.out
+*.exe
+*.d
+*.dSYM/
+
+# In-tree / IDE CMake build dirs
+c/build/
+c/cmake-build-*/
+cmake-build-*/
+
+# Built binaries (if generated outside build/)
+c/chat
+c/generate
+c/test_quant
+c/test_tokenizer
+
+# Third-party clones (llama.cpp is its own git repo)
+/3rd/
+
+# IDEs / editors
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini

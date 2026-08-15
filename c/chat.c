@@ -1,0 +1,188 @@
+#define _POSIX_C_SOURCE 200809L
+#include "generate.h"
+#include "gguf.h"
+#include "util.h"
+
+#ifndef LLM_DEFAULT_MODEL
+#define LLM_DEFAULT_MODEL "../nanogpt-chat-q8_0.gguf"
+#endif
+
+static void usage(const char *argv0) {
+    fprintf(stderr,
+            "Usage: %s [--model PATH] [--max-tokens N] [--temp F] [--top-p F] [--top-k N] [--ctx N]\n",
+            argv0);
+}
+
+static char *strip_end_marker(char *reply) {
+    size_t n = strlen(reply);
+    while (n && (reply[n - 1] == ' ' || reply[n - 1] == '\n' || reply[n - 1] == '\t')) reply[--n] = 0;
+    if (n >= 4 && strcmp(reply + n - 4, " END") == 0) {
+        reply[n - 4] = 0;
+        n -= 4;
+    } else if (n >= 3 && strcmp(reply + n - 3, "END") == 0) {
+        reply[n - 3] = 0;
+        n -= 3;
+    }
+    while (n && (reply[n - 1] == ' ' || reply[n - 1] == '\n' || reply[n - 1] == '\t')) reply[--n] = 0;
+    return reply;
+}
+
+static int prefix_equal(const int *a, int na, const int *b, int nb) {
+    if (na > nb) return 0;
+    for (int i = 0; i < na; i++)
+        if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *model_path = LLM_DEFAULT_MODEL;
+    int max_tokens = 256;
+    float temp = 0.8f;
+    float top_p = 0.9f;
+    int top_k = 0;
+    int ctx = 2048;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
+        else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) max_tokens = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) temp = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) top_p = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(argv[0]);
+            return 0;
+        } else {
+            usage(argv[0]);
+            return 1;
+        }
+    }
+
+    printf("loading %s\n", model_path);
+    fflush(stdout);
+    LoadedModel *loaded = load_model(model_path, 1, 1);
+    LlamaModel *model = llama_model_init(loaded);
+    Tokenizer *tok = tokenizer_from_gguf(loaded->gguf, &loaded->hparams);
+    KVCache *cache = llama_model_new_cache(model, 1, ctx);
+
+    ChatMessage *history = NULL;
+    int nh = 0, hcap = 0;
+    IntVec cached_ids;
+    intvec_init(&cached_ids);
+
+    printf("Chat ready. Empty line or /exit to quit, /reset to clear history.\n\n");
+    char *line = NULL;
+    size_t linecap = 0;
+    for (;;) {
+        fputs("You: ", stdout);
+        fflush(stdout);
+        ssize_t nr = getline(&line, &linecap, stdin);
+        if (nr < 0) {
+            fputc('\n', stdout);
+            break;
+        }
+        while (nr > 0 && (line[nr - 1] == '\n' || line[nr - 1] == '\r')) line[--nr] = 0;
+        char *user = line;
+        while (*user == ' ' || *user == '\t') user++;
+        size_t ulen = strlen(user);
+        while (ulen && (user[ulen - 1] == ' ' || user[ulen - 1] == '\t')) user[--ulen] = 0;
+        if (!user[0] || strcmp(user, "/exit") == 0 || strcmp(user, "/quit") == 0) break;
+        if (strcmp(user, "/reset") == 0) {
+            for (int i = 0; i < nh; i++) {
+                free(history[i].role);
+                free(history[i].content);
+            }
+            nh = 0;
+            intvec_clear(&cached_ids);
+            kvcache_reset(cache);
+            printf("(context cleared)\n");
+            continue;
+        }
+
+        if (nh >= hcap) {
+            hcap = hcap ? hcap * 2 : 8;
+            history = xrealloc(history, (size_t)hcap * sizeof(ChatMessage));
+        }
+        history[nh].role = xstrdup("user");
+        history[nh].content = xstrdup(user);
+        nh++;
+
+        char *full = apply_chat_template(history, nh, 1);
+        IntVec ids;
+        intvec_init(&ids);
+        tokenizer_encode(tok, full, 1, &ids);
+        free(full);
+
+        const int *prompt_ids = ids.data;
+        int n_prompt = ids.n;
+        if (cached_ids.n && prefix_equal(cached_ids.data, cached_ids.n, ids.data, ids.n)) {
+            prompt_ids = ids.data + cached_ids.n;
+            n_prompt = ids.n - cached_ids.n;
+        } else {
+            kvcache_reset(cache);
+            intvec_clear(&cached_ids);
+        }
+        if (n_prompt <= 0) {
+            intvec_free(&ids);
+            continue;
+        }
+
+        fputs("Assistant: ", stdout);
+        fflush(stdout);
+        StreamDecoder dec;
+        stream_decoder_init(&dec, tok, 1);
+        IntVec gen_ids;
+        intvec_init(&gen_ids);
+        GenerateState st;
+        generate_state_init(&st, model, tok, cache, max_tokens, temp, top_k, top_p);
+        generate_start(&st, prompt_ids, n_prompt);
+        int tid;
+        while (generate_next(&st, &tid) == 0) {
+            intvec_push(&gen_ids, tid);
+            char *chunk = stream_decoder_push(&dec, tid);
+            if (chunk[0]) {
+                fputs(chunk, stdout);
+                fflush(stdout);
+            }
+            free(chunk);
+        }
+        char *tail = stream_decoder_flush(&dec);
+        if (tail[0]) fputs(tail, stdout);
+        free(tail);
+        fputc('\n', stdout);
+        fflush(stdout);
+        generate_state_free(&st);
+        stream_decoder_free(&dec);
+
+        char *reply = tokenizer_decode(tok, gen_ids.data, gen_ids.n, 1);
+        size_t rlen = strlen(reply);
+        while (rlen && (reply[rlen - 1] == ' ' || reply[rlen - 1] == '\n' || reply[rlen - 1] == '\t'))
+            reply[--rlen] = 0;
+        strip_end_marker(reply);
+        if (nh >= hcap) {
+            hcap = hcap ? hcap * 2 : 8;
+            history = xrealloc(history, (size_t)hcap * sizeof(ChatMessage));
+        }
+        history[nh].role = xstrdup("assistant");
+        history[nh].content = reply;
+        nh++;
+
+        intvec_clear(&cached_ids);
+        intvec_extend(&cached_ids, ids.data, ids.n);
+        intvec_extend(&cached_ids, gen_ids.data, gen_ids.n);
+        intvec_free(&ids);
+        intvec_free(&gen_ids);
+    }
+    free(line);
+    for (int i = 0; i < nh; i++) {
+        free(history[i].role);
+        free(history[i].content);
+    }
+    free(history);
+    intvec_free(&cached_ids);
+    kvcache_free(cache);
+    tokenizer_free(tok);
+    llama_model_free(model);
+    loaded_model_free(loaded);
+    return 0;
+}
