@@ -51,6 +51,7 @@ compile_commands.json
 
 # In-tree / IDE CMake build dirs
 c/build/
+c/build-android/
 c/cmake-build-*/
 cmake-build-*/
 

@@ -184,6 +184,7 @@ static void gguf_value_free(GGUFValue *v) {
 GGUFFile *open_gguf(const char *path) {
     GGUFFile *f = xcalloc(1, sizeof(GGUFFile));
     f->path = xstrdup(path);
+    f->fd = -1;
     f->fd = open(path, O_RDONLY);
     if (f->fd < 0) die("cannot open %s: %s", path, strerror(errno));
     struct stat st;
@@ -228,10 +229,17 @@ GGUFFile *open_gguf(const char *path) {
     return f;
 }
 
-void gguf_close(GGUFFile *f) {
+void gguf_unmap(GGUFFile *f) {
     if (!f) return;
     if (f->map && f->map != MAP_FAILED) munmap(f->map, f->map_size);
+    f->map = NULL;
     if (f->fd >= 0) close(f->fd);
+    f->fd = -1;
+}
+
+void gguf_close(GGUFFile *f) {
+    if (!f) return;
+    gguf_unmap(f);
     for (int i = 0; i < f->n_kv; i++) {
         free(f->kv_keys[i]);
         gguf_value_free(&f->kv_vals[i]);
@@ -376,6 +384,8 @@ LoadedModel *load_model(const char *path, int dequant, int progress) {
             fflush(stdout);
         }
     }
+    /* Weights are f32 copies; drop the Q8 mapping to free RSS. */
+    gguf_unmap(m->gguf);
     return m;
 }
 

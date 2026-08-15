@@ -102,6 +102,8 @@ typedef struct {
 } LoadedModel;
 
 GGUFFile *open_gguf(const char *path);
+/* Drop the file mapping after tensors are copied out (hparams/KV stay in RAM). */
+void gguf_unmap(GGUFFile *f);
 void gguf_close(GGUFFile *f);
 const GGUFValue *gguf_get(const GGUFFile *f, const char *key);
 const TensorInfo *gguf_find_tensor(const GGUFFile *f, const char *name);
