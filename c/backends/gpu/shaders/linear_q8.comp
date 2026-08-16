@@ -1,0 +1,66 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(std430, binding = 0) readonly buffer WBuf { float W[]; };
+layout(std430, binding = 1) readonly buffer XBuf { float X[]; };
+layout(std430, binding = 2) buffer YBuf { float Y[]; };
+
+shared float red[64];
+
+float q8_w(uint base, uint lane) {
+    float d = W[base];
+    uint word = floatBitsToUint(W[base + 1u + (lane >> 2u)]);
+    uint b = (word >> ((lane & 3u) * 8u)) & 255u;
+    int q = int(b << 24u) >> 24;
+    return float(q) * d;
+}
+
+void main() {
+    uint n_tok = uint(pc.i0), n_out = uint(pc.i1), n_in = uint(pc.i2);
+    uint row0 = gl_WorkGroupID.x * 8u;
+    uint t = gl_WorkGroupID.y;
+    if (t >= n_tok) return;
+    uint lid = gl_LocalInvocationID.x;
+    uint n_blocks = n_in >> 5u;
+    uint group = lid >> 5u;
+    uint lane = lid & 31u;
+    uint xbase = t * n_in;
+    float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    float a4 = 0.0, a5 = 0.0, a6 = 0.0, a7 = 0.0;
+    for (uint blk = group; blk < n_blocks; blk += 2u) {
+        float xv = X[xbase + blk * 32u + lane];
+        uint i = row0;
+        if (i < n_out) a0 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 1u;
+        if (i < n_out) a1 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 2u;
+        if (i < n_out) a2 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 3u;
+        if (i < n_out) a3 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 4u;
+        if (i < n_out) a4 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 5u;
+        if (i < n_out) a5 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 6u;
+        if (i < n_out) a6 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+        i = row0 + 7u;
+        if (i < n_out) a7 += q8_w((i * n_blocks + blk) * 9u, lane) * xv;
+    }
+    float accs[8] = float[](a0, a1, a2, a3, a4, a5, a6, a7);
+    for (uint r = 0u; r < 8u; r++) {
+        red[lid] = accs[r];
+        barrier();
+        for (uint off = 32u; off > 0u; off >>= 1u) {
+            if (lid < off) red[lid] += red[lid + off];
+            barrier();
+        }
+        uint i = row0 + r;
+        if (lid == 0u && i < n_out) Y[t * n_out + i] = red[0];
+        barrier();
+    }
+}

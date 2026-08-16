@@ -1,6 +1,7 @@
 #include "tensor.h"
 #include <math.h>
 #include <float.h>
+#include <string.h>
 
 void linear(const float *W, const float *x, float *y, int n_out, int n_in) {
     for (int i = 0; i < n_out; i++) {
@@ -14,6 +15,19 @@ void linear(const float *W, const float *x, float *y, int n_out, int n_in) {
 void linear_rows(const float *W, const float *x, float *y, int n_tok, int n_out, int n_in) {
     for (int t = 0; t < n_tok; t++) {
         linear(W, x + (size_t)t * (size_t)n_in, y + (size_t)t * (size_t)n_out, n_out, n_in);
+    }
+}
+
+void linear_rows_add(const float *W, const float *x, float *y, int n_tok, int n_out, int n_in) {
+    for (int t = 0; t < n_tok; t++) {
+        const float *xt = x + (size_t)t * (size_t)n_in;
+        float *yt = y + (size_t)t * (size_t)n_out;
+        for (int i = 0; i < n_out; i++) {
+            const float *w = W + (size_t)i * (size_t)n_in;
+            float acc = 0.0f;
+            for (int j = 0; j < n_in; j++) acc += w[j] * xt[j];
+            yt[i] += acc;
+        }
     }
 }
 
@@ -33,6 +47,13 @@ void rmsnorm_rows(const float *x, const float *weight, float *y, int n_tok, int 
 
 void silu(const float *x, float *y, int n) {
     for (int i = 0; i < n; i++) y[i] = x[i] / (1.0f + expf(-x[i]));
+}
+
+void silu_mul(const float *x, const float *g, float *y, int n) {
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        y[i] = (v / (1.0f + expf(-v))) * g[i];
+    }
 }
 
 void softmax_inplace(float *x, int n) {
@@ -61,6 +82,12 @@ void vec_add(const float *a, const float *b, float *y, int n) {
 
 void vec_mul(const float *a, const float *b, float *y, int n) {
     for (int i = 0; i < n; i++) y[i] = a[i] * b[i];
+}
+
+void embed_gather(const float *table, const int *ids, float *out, int n_rows, int d) {
+    for (int t = 0; t < n_rows; t++)
+        memcpy(out + (size_t)t * (size_t)d, table + (size_t)ids[t] * (size_t)d,
+               (size_t)d * sizeof(float));
 }
 
 int argmax_f64(const double *x, int n) {

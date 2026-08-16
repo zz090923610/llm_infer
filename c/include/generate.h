@@ -20,8 +20,9 @@ typedef struct {
     float *logits;
 } GenerateState;
 
+/* seed 0 uses time(NULL). */
 void generate_state_init(GenerateState *st, LlamaModel *model, Tokenizer *tok, KVCache *cache,
-                         int max_tokens, float temperature, int top_k, float top_p);
+                         int max_tokens, float temperature, int top_k, float top_p, uint64_t seed);
 void generate_state_free(GenerateState *st);
 
 /* Prefill. Returns 0. */
@@ -31,7 +32,7 @@ int generate_next(GenerateState *st, int *token_out);
 
 char *generate_text(LlamaModel *model, Tokenizer *tok, const char *prompt, int max_tokens,
                     float temperature, int top_k, float top_p, int parse_special, int stream,
-                    KVCache *cache);
+                    KVCache *cache, uint64_t seed);
 
 /* Returns newly allocated array of IntVec (length n_prompts). Caller frees each + the array. */
 IntVec *generate_batch(LlamaModel *model, Tokenizer *tok, char **prompts, int n_prompts,

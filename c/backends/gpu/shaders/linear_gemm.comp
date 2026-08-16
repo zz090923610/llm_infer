@@ -1,0 +1,52 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(binding = 0) uniform textureBuffer WTex;
+layout(std430, binding = 1) readonly buffer XBuf { float X[]; };
+layout(std430, binding = 2) buffer YBuf { float Y[]; };
+
+shared float red[64];
+
+void main() {
+    uint n_tok = uint(pc.i0), n_out = uint(pc.i1), n_in = uint(pc.i2);
+    uint accf = uint(pc.i3);
+    uint row0 = gl_WorkGroupID.x * 8u;
+    uint t0 = gl_WorkGroupID.y * 4u;
+    uint lid = gl_LocalInvocationID.x;
+    for (uint r = 0u; r < 8u; r++) {
+        uint i = row0 + r;
+        float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+        for (uint j = lid; j < n_in; j += 64u) {
+            float w = (i < n_out) ? texelFetch(WTex, int(i * n_in + j)).r : 0.0;
+            uint t = t0;
+            if (t < n_tok) a0 += w * X[t * n_in + j];
+            t = t0 + 1u;
+            if (t < n_tok) a1 += w * X[t * n_in + j];
+            t = t0 + 2u;
+            if (t < n_tok) a2 += w * X[t * n_in + j];
+            t = t0 + 3u;
+            if (t < n_tok) a3 += w * X[t * n_in + j];
+        }
+        float accs[4] = float[](a0, a1, a2, a3);
+        for (uint t = 0u; t < 4u; t++) {
+            red[lid] = accs[t];
+            barrier();
+            for (uint off = 32u; off > 0u; off >>= 1u) {
+                if (lid < off) red[lid] += red[lid + off];
+                barrier();
+            }
+            uint tt = t0 + t;
+            if (lid == 0u && tt < n_tok && i < n_out) {
+                uint yi = tt * n_out + i;
+                Y[yi] = (accf != 0u) ? Y[yi] + red[0] : red[0];
+            }
+            barrier();
+        }
+    }
+}

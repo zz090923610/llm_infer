@@ -14,7 +14,7 @@ static int is_stop(Tokenizer *tok, int tid) {
 }
 
 void generate_state_init(GenerateState *st, LlamaModel *model, Tokenizer *tok, KVCache *cache,
-                         int max_tokens, float temperature, int top_k, float top_p) {
+                         int max_tokens, float temperature, int top_k, float top_p, uint64_t seed) {
     memset(st, 0, sizeof(*st));
     st->model = model;
     st->tok = tok;
@@ -24,7 +24,7 @@ void generate_state_init(GenerateState *st, LlamaModel *model, Tokenizer *tok, K
     st->temperature = temperature;
     st->top_k = top_k;
     st->top_p = top_p;
-    rng_seed(&st->rng, (uint64_t)time(NULL) ^ 0xA5A5A5A5ULL);
+    rng_seed(&st->rng, seed ? seed : ((uint64_t)time(NULL) ^ 0xA5A5A5A5ULL));
 }
 
 void generate_state_free(GenerateState *st) {
@@ -57,12 +57,12 @@ int generate_next(GenerateState *st, int *token_out) {
 
 char *generate_text(LlamaModel *model, Tokenizer *tok, const char *prompt, int max_tokens,
                     float temperature, int top_k, float top_p, int parse_special, int stream,
-                    KVCache *cache) {
+                    KVCache *cache, uint64_t seed) {
     IntVec ids;
     intvec_init(&ids);
     tokenizer_encode(tok, prompt, parse_special, &ids);
     GenerateState st;
-    generate_state_init(&st, model, tok, cache, max_tokens, temperature, top_k, top_p);
+    generate_state_init(&st, model, tok, cache, max_tokens, temperature, top_k, top_p, seed);
     StreamDecoder dec;
     stream_decoder_init(&dec, tok, 1);
     ByteVec pieces;

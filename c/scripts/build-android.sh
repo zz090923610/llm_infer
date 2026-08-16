@@ -25,6 +25,7 @@ PLATFORM="${ANDROID_PLATFORM:-android-28}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 # NEON + pthread backend for Snapdragon 8 Gen 3 (OnePlus Ace 5).
+# GPU: LLM_BACKEND=gpu (Vulkan / Adreno 750).
 BACKEND="${LLM_BACKEND:-aarch64}"
 
 cmake -S "$ROOT/c" -B "$BUILD_DIR" \
@@ -53,3 +54,10 @@ for bin in chat generate; do
   fi
 done
 echo "Android $ABI binaries: $BUILD_DIR/{chat,generate}"
+if [[ -f "$BUILD_DIR/test_linear" ]]; then
+  echo "  plus $BUILD_DIR/test_linear"
+fi
+if [[ "$BACKEND" == "gpu" ]]; then
+  echo "GPU binaries need vendor ICD libs on device:"
+  echo "  export LD_LIBRARY_PATH=/vendor/lib64:/vendor/lib64/hw"
+fi

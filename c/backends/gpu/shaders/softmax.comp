@@ -1,0 +1,46 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(std430, binding = 0) buffer XBuf { float X[]; };
+
+shared float red[64];
+
+void main() {
+    uint n = uint(pc.i0), n_rows = uint(pc.i1);
+    uint row = gl_WorkGroupID.x;
+    if (row >= n_rows) return;
+    uint lid = gl_LocalInvocationID.x;
+    uint base = row * n;
+
+    float m = uintBitsToFloat(0xff800000u);
+    for (uint i = lid; i < n; i += 64u) m = max(m, X[base + i]);
+    red[lid] = m;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (lid < s) red[lid] = max(red[lid], red[lid + s]);
+        barrier();
+    }
+    m = red[0];
+    barrier();
+
+    float sum = 0.0;
+    for (uint i = lid; i < n; i += 64u) {
+        float e = exp(X[base + i] - m);
+        X[base + i] = e;
+        sum += e;
+    }
+    red[lid] = sum;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (lid < s) red[lid] += red[lid + s];
+        barrier();
+    }
+    float inv = red[0] > 0.0 ? 1.0 / red[0] : 0.0;
+    barrier();
+    for (uint i = lid; i < n; i += 64u) X[base + i] *= inv;
+}

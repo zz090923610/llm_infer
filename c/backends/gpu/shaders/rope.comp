@@ -1,0 +1,36 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(std430, binding = 0) buffer XBuf { float X[]; };
+layout(std430, binding = 1) readonly buffer CosBuf { float Cos[]; };
+layout(std430, binding = 2) readonly buffer SinBuf { float Sin[]; };
+layout(std430, binding = 3) readonly buffer PosBuf { int Pos[]; };
+
+void main() {
+    uint B = uint(pc.i0), n_head = uint(pc.i1), S = uint(pc.i2), hd = uint(pc.i3);
+    uint pairs = hd / 2u;
+    uint total = B * n_head * S * pairs;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    uint idx = gl_GlobalInvocationID.y * stride + gl_GlobalInvocationID.x;
+    if (idx >= total) return;
+    uint p = idx % pairs;
+    uint tmp = idx / pairs;
+    uint s = tmp % S;
+    tmp /= S;
+    uint h = tmp % n_head;
+    uint b = tmp / n_head;
+    int pos = Pos[b * S + s];
+    uint row = (((b * n_head + h) * S + s) * hd) + p * 2u;
+    uint cidx = uint(pos) * hd + p * 2u;
+    float x0 = X[row];
+    float x1 = X[row + 1u];
+    float cv = Cos[cidx];
+    float sv = Sin[cidx];
+    X[row] = x0 * cv - x1 * sv;
+    X[row + 1u] = x0 * sv + x1 * cv;
+}

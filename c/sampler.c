@@ -1,5 +1,6 @@
 #include "sampler.h"
 #include "tensor.h"
+#include "backend.h"
 #include "util.h"
 #include <math.h>
 #include <float.h>
@@ -51,6 +52,7 @@ static int pair_cmp_desc(const void *a, const void *b) {
 
 int sample_token(const float *logits, int n, float temperature, int top_k, float top_p, Rng *rng) {
     if (temperature <= 0.0f || top_k == 1) return argmax_f32(logits, n);
+    llm_backend_host_read(logits);
 
     double *x = xmalloc((size_t)n * sizeof(double));
     for (int i = 0; i < n; i++) x[i] = (double)logits[i] / (double)temperature;

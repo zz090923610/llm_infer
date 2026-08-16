@@ -10,7 +10,8 @@
 static void usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--prompt TEXT] [--max-tokens N] [--temp F] [--top-p F] "
-            "[--top-k N] [--threads N] [--prefill-threads N] [--decode-threads N] [--batch-demo]\n",
+            "[--top-k N] [--seed N] [--threads N] [--prefill-threads N] [--decode-threads N] "
+            "[--batch-demo]\n",
             argv0);
 }
 
@@ -25,6 +26,7 @@ int main(int argc, char **argv) {
     int n_threads = 0;
     int n_prefill = 0;
     int n_decode = 0;
+    uint64_t seed = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
@@ -33,6 +35,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) temp = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) top_p = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) seed = (uint64_t)strtoull(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) n_threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--prefill-threads") == 0 && i + 1 < argc) n_prefill = atoi(argv[++i]);
         else if (strcmp(argv[i], "--decode-threads") == 0 && i + 1 < argc) n_decode = atoi(argv[++i]);
@@ -84,7 +87,7 @@ int main(int argc, char **argv) {
     } else {
         ChatMessage msg = {"user", (char *)prompt};
         char *text = apply_chat_template(&msg, 1, 1);
-        char *out = generate_text(model, tok, text, max_tokens, temp, top_k, top_p, 1, 1, NULL);
+        char *out = generate_text(model, tok, text, max_tokens, temp, top_k, top_p, 1, 1, NULL, seed);
         free(out);
         free(text);
     }

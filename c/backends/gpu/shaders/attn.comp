@@ -1,0 +1,78 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(std430, binding = 0) buffer YBuf { float Y[]; };
+layout(std430, binding = 1) readonly buffer QBuf { float Q[]; };
+layout(std430, binding = 2) readonly buffer KBuf { float K[]; };
+layout(std430, binding = 3) readonly buffer VBuf { float V[]; };
+layout(std430, binding = 4) readonly buffer PosBuf { int Pos[]; };
+layout(std430, binding = 5) readonly buffer VLBuf { int VL[]; };
+layout(std430, binding = 6) readonly buffer KLBuf { int KL[]; };
+
+shared float qsh[64];
+shared float red[64];
+
+void main() {
+    uint B = uint(pc.i0), n_head = uint(pc.i1), S = uint(pc.i2), n_kv = uint(pc.i3);
+    uint d = uint(pc.i4);
+    int max_k = pc.i5;
+    uint batch_stride = uint(pc.i6), head_stride = uint(pc.i7);
+    float scale = pc.f0;
+
+    uint wg = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    uint b = wg / (n_head * S);
+    uint rem = wg % (n_head * S);
+    uint h = rem / S;
+    uint s = rem % S;
+    uint lid = gl_LocalInvocationID.x;
+
+    if (b >= B) return;
+
+    int qpos = Pos[b * S + s];
+    bool q_valid = int(s) < VL[b];
+    uint n_rep = n_head / n_kv;
+    uint kv_h = h / n_rep;
+    uint qbase = ((b * n_head + h) * S + s) * d;
+
+    qsh[lid] = (lid < d) ? Q[qbase + lid] : 0.0;
+    barrier();
+
+    if (!q_valid) {
+        if (lid < d) Y[qbase + lid] = 0.0;
+        return;
+    }
+
+    int klen = KL[b];
+    uint kbase0 = b * batch_stride + kv_h * head_stride;
+    float m = -1.0e30;
+    float lsum = 0.0;
+    float acc = 0.0;
+
+    for (int kp = 0; kp < max_k; kp++) {
+        bool vis = (kp <= qpos) && (kp < klen);
+        uint kbase = kbase0 + uint(kp) * d;
+        float prod = 0.0;
+        if (lid < d) prod = qsh[lid] * K[kbase + lid];
+        red[lid] = prod;
+        barrier();
+        for (uint off = 32u; off > 0u; off >>= 1u) {
+            if (lid < off) red[lid] += red[lid + off];
+            barrier();
+        }
+        float score = vis ? red[0] * scale : -1.0e30;
+        float m_new = max(m, score);
+        float e = exp(score - m_new);
+        float alpha = exp(m - m_new);
+        float v = (lid < d) ? V[kbase + lid] : 0.0;
+        acc = acc * alpha + e * v;
+        lsum = lsum * alpha + e;
+        m = m_new;
+        barrier();
+    }
+    if (lid < d) Y[qbase + lid] = (lsum > 0.0) ? acc / lsum : 0.0;
+}

@@ -92,12 +92,93 @@ static void test_linear_rows_shape(int n_tok, int n_out, int n_in) {
     fill_rand(W, n_out * n_in);
     fill_rand(x, n_tok * n_in);
     linear_rows(W, x, y, n_tok, n_out, n_in);
+    llm_backend_sync();
     for (int t = 0; t < n_tok; t++) {
         linear_ref(W, x + (size_t)t * (size_t)n_in, ref + (size_t)t * (size_t)n_out, n_out, n_in);
     }
     char tag[80];
     snprintf(tag, sizeof(tag), "linear_rows n_tok=%d n_out=%d n_in=%d", n_tok, n_out, n_in);
     check_close(y, ref, n_tok * n_out, n_in, tag);
+    free(W);
+    free(x);
+    free(y);
+    free(ref);
+}
+
+static void test_linear_rows_add_shape(int n_tok, int n_out, int n_in) {
+    float *W = malloc((size_t)n_out * (size_t)n_in * sizeof(float));
+    float *x = malloc((size_t)n_tok * (size_t)n_in * sizeof(float));
+    float *y = malloc((size_t)n_tok * (size_t)n_out * sizeof(float));
+    float *ref = malloc((size_t)n_tok * (size_t)n_out * sizeof(float));
+    expect_eq(W && x && y && ref, "alloc linear_rows_add");
+    if (!W || !x || !y || !ref) {
+        free(W);
+        free(x);
+        free(y);
+        free(ref);
+        return;
+    }
+    fill_rand(W, n_out * n_in);
+    fill_rand(x, n_tok * n_in);
+    fill_rand(y, n_tok * n_out);
+    memcpy(ref, y, (size_t)n_tok * (size_t)n_out * sizeof(float));
+    llm_backend_host_write(y);
+    linear_rows_add(W, x, y, n_tok, n_out, n_in);
+    llm_backend_sync();
+    for (int t = 0; t < n_tok; t++) {
+        float *tmp = malloc((size_t)n_out * sizeof(float));
+        linear_ref(W, x + (size_t)t * (size_t)n_in, tmp, n_out, n_in);
+        for (int i = 0; i < n_out; i++)
+            ref[(size_t)t * (size_t)n_out + i] += tmp[i];
+        free(tmp);
+    }
+    char tag[80];
+    snprintf(tag, sizeof(tag), "linear_rows_add n_tok=%d n_out=%d n_in=%d", n_tok, n_out, n_in);
+    check_close(y, ref, n_tok * n_out, n_in, tag);
+    free(W);
+    free(x);
+    free(y);
+    free(ref);
+}
+
+static void check_close_f16(const float *got, const float *ref, int n, int n_in, const char *tag) {
+    float max_abs = 0.0f;
+    float tol = 5e-3f * (float)n_in + 0.05f;
+    for (int i = 0; i < n; i++) {
+        float e = fabsf(got[i] - ref[i]);
+        if (e > max_abs) max_abs = e;
+        if (e > tol) {
+            fprintf(stderr, "FAIL: %s[%d] got=%g ref=%g err=%g tol=%g\n", tag, i, got[i], ref[i], e,
+                    tol);
+            fails++;
+            return;
+        }
+    }
+    (void)max_abs;
+}
+
+static void test_linear_f16_texel(int n_out, int n_in) {
+    float *W = malloc((size_t)n_out * (size_t)n_in * sizeof(float));
+    float *x = malloc((size_t)n_in * sizeof(float));
+    float *y = malloc((size_t)n_out * sizeof(float));
+    float *ref = malloc((size_t)n_out * sizeof(float));
+    expect_eq(W && x && y && ref, "alloc linear f16");
+    if (!W || !x || !y || !ref) {
+        free(W);
+        free(x);
+        free(y);
+        free(ref);
+        return;
+    }
+    fill_rand(W, n_out * n_in);
+    fill_rand(x, n_in);
+    llm_backend_intern_weight_f16(W, (size_t)n_out * (size_t)n_in * sizeof(float));
+    linear_rows(W, x, y, 1, n_out, n_in);
+    llm_backend_sync();
+    linear_ref(W, x, ref, n_out, n_in);
+    char tag[64];
+    snprintf(tag, sizeof(tag), "linear f16 texel n_out=%d n_in=%d", n_out, n_in);
+    check_close_f16(y, ref, n_out, n_in, tag);
     free(W);
     free(x);
     free(y);
@@ -112,6 +193,15 @@ int main(void) {
         test_linear_rows_shape(1, 16, n_ins[k]);
         test_linear_rows_shape(5, 16, n_ins[k]);
     }
+    test_linear_shape(960, 960);
+    test_linear_rows_shape(1, 960, 960);
+    test_linear_rows_shape(4, 2560, 960);
+    test_linear_rows_shape(32, 960, 960);
+    test_linear_rows_add_shape(1, 16, 960);
+    test_linear_rows_add_shape(4, 16, 960);
+    test_linear_rows_add_shape(5, 960, 960);
+    test_linear_f16_texel(960, 960);
+    test_linear_f16_texel(16, 960);
     if (fails) {
         fprintf(stderr, "%d failure(s)\n", fails);
         return 1;

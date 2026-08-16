@@ -31,6 +31,8 @@ typedef struct {
     int *positions;
     int *key_len;
     int *starts;
+    int *valid_buf;
+    int *tok_ids;
     int scratch_B, scratch_S, scratch_K;
 } LlamaModel;
 

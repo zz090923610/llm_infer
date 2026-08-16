@@ -4,6 +4,7 @@
 #include <immintrin.h>
 #include <math.h>
 #include <float.h>
+#include <string.h>
 
 static float hsum256(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
@@ -17,7 +18,7 @@ static float hsum256(__m256 v) {
 }
 
 static void linear_range(const float *W, const float *x, float *y, int n_out, int n_in, int i0,
-                         int i1) {
+                         int i1, int add) {
     (void)n_out;
     for (int i = i0; i < i1; i++) {
         const float *w = W + (size_t)i * (size_t)n_in;
@@ -33,12 +34,12 @@ static void linear_range(const float *W, const float *x, float *y, int n_out, in
         }
         float sum = hsum256(acc);
         for (; j < n_in; j++) sum += w[j] * x[j];
-        y[i] = sum;
+        y[i] = add ? y[i] + sum : sum;
     }
 }
 
 static void linear_rows_range(const float *W, const float *x, float *y, int n_tok, int n_out, int n_in,
-                              int i0, int i1) {
+                              int i0, int i1, int add) {
     int t = 0;
     for (; t + 4 <= n_tok; t += 4) {
         const float *x0 = x + (size_t)(t + 0) * (size_t)n_in;
@@ -74,15 +75,15 @@ static void linear_rows_range(const float *W, const float *x, float *y, int n_to
                 s2 += wv * x2[j];
                 s3 += wv * x3[j];
             }
-            y0[i] = s0;
-            y1[i] = s1;
-            y2[i] = s2;
-            y3[i] = s3;
+            y0[i] = add ? y0[i] + s0 : s0;
+            y1[i] = add ? y1[i] + s1 : s1;
+            y2[i] = add ? y2[i] + s2 : s2;
+            y3[i] = add ? y3[i] + s3 : s3;
         }
     }
     for (; t < n_tok; t++) {
         linear_range(W, x + (size_t)t * (size_t)n_in, y + (size_t)t * (size_t)n_out, n_out, n_in, i0,
-                     i1);
+                     i1, add);
     }
 }
 
@@ -94,6 +95,7 @@ typedef struct {
     int n_out;
     int n_in;
     int rows;
+    int acc;
 } LinearJob;
 
 static void row_slice(int tid, int n_threads, int n_out, int *i0, int *i1) {
@@ -115,14 +117,14 @@ static void linear_job(int tid, int n_threads, void *ctx) {
     row_slice(tid, n_threads, j->n_out, &i0, &i1);
     if (i0 >= i1) return;
     if (j->rows) {
-        linear_rows_range(j->W, j->x, j->y, j->n_tok, j->n_out, j->n_in, i0, i1);
+        linear_rows_range(j->W, j->x, j->y, j->n_tok, j->n_out, j->n_in, i0, i1, j->acc);
     } else {
-        linear_range(j->W, j->x, j->y, j->n_out, j->n_in, i0, i1);
+        linear_range(j->W, j->x, j->y, j->n_out, j->n_in, i0, i1, j->acc);
     }
 }
 
 void linear(const float *W, const float *x, float *y, int n_out, int n_in) {
-    LinearJob job = {W, x, y, 1, n_out, n_in, 0};
+    LinearJob job = {W, x, y, 1, n_out, n_in, 0, 0};
     llm_pool_run(linear_job, &job, llm_backend_n_decode_threads());
 }
 
@@ -132,8 +134,15 @@ void linear_rows(const float *W, const float *x, float *y, int n_tok, int n_out,
         linear(W, x, y, n_out, n_in);
         return;
     }
-    LinearJob job = {W, x, y, n_tok, n_out, n_in, 1};
+    LinearJob job = {W, x, y, n_tok, n_out, n_in, 1, 0};
     llm_pool_run(linear_job, &job, llm_backend_n_prefill_threads());
+}
+
+void linear_rows_add(const float *W, const float *x, float *y, int n_tok, int n_out, int n_in) {
+    if (n_tok <= 0) return;
+    LinearJob job = {W, x, y, n_tok, n_out, n_in, n_tok > 1, 1};
+    llm_pool_run(linear_job, &job, n_tok > 1 ? llm_backend_n_prefill_threads()
+                                             : llm_backend_n_decode_threads());
 }
 
 void rmsnorm(const float *x, const float *weight, float *y, int n, float eps) {
@@ -165,6 +174,13 @@ void rmsnorm_rows(const float *x, const float *weight, float *y, int n_tok, int 
 
 void silu(const float *x, float *y, int n) {
     for (int i = 0; i < n; i++) y[i] = x[i] / (1.0f + expf(-x[i]));
+}
+
+void silu_mul(const float *x, const float *g, float *y, int n) {
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        y[i] = (v / (1.0f + expf(-v))) * g[i];
+    }
 }
 
 void softmax_inplace(float *x, int n) {
@@ -201,6 +217,12 @@ void vec_mul(const float *a, const float *b, float *y, int n) {
         _mm256_storeu_ps(y + i, _mm256_mul_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
     }
     for (; i < n; i++) y[i] = a[i] * b[i];
+}
+
+void embed_gather(const float *table, const int *ids, float *out, int n_rows, int d) {
+    for (int t = 0; t < n_rows; t++)
+        memcpy(out + (size_t)t * (size_t)d, table + (size_t)ids[t] * (size_t)d,
+               (size_t)d * sizeof(float));
 }
 
 int argmax_f64(const double *x, int n) {

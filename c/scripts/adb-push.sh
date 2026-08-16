@@ -37,6 +37,7 @@ fi
 
 CHAT="$BUILD_DIR/chat"
 GEN="$BUILD_DIR/generate"
+TEST_LINEAR="$BUILD_DIR/test_linear"
 if [[ ! -x "$CHAT" && ! -f "$CHAT" ]]; then
   echo "error: missing $CHAT (run c/scripts/build-android.sh first)" >&2
   exit 1
@@ -56,16 +57,33 @@ echo "pushing to $REMOTE (Files app: Download/llm_infer)"
 adb shell "mkdir -p '$REMOTE'"
 adb push "$CHAT" "$REMOTE/chat"
 adb push "$GEN" "$REMOTE/generate"
+if [[ -f "$TEST_LINEAR" ]]; then
+  adb push "$TEST_LINEAR" "$REMOTE/test_linear"
+fi
 adb push "$MODEL" "$REMOTE/$MODEL_NAME"
-adb shell "chmod 755 '$RUN_DIR/chat' '$RUN_DIR/generate'"
+if [[ -f "$TEST_LINEAR" ]]; then
+  adb shell "chmod 755 '$RUN_DIR/chat' '$RUN_DIR/generate' '$RUN_DIR/test_linear'"
+else
+  adb shell "chmod 755 '$RUN_DIR/chat' '$RUN_DIR/generate'"
+fi
 
 echo "on device (run via pass-through; /sdcard is FUSE noexec):"
 echo "  adb shell -t"
+echo "  export LD_LIBRARY_PATH=/vendor/lib64:/vendor/lib64/hw"
 echo "  $RUN_DIR/generate --model $RUN_DIR/$MODEL_NAME --prompt \"Hello\" --temp 0 --max-tokens 32"
 echo "  $RUN_DIR/chat --model $RUN_DIR/$MODEL_NAME --ctx 1024"
+if [[ -f "$TEST_LINEAR" ]]; then
+  echo "  $RUN_DIR/test_linear"
+fi
 
 if [[ "$RUN" -eq 1 ]]; then
+  GPU_ENV="LD_LIBRARY_PATH=/vendor/lib64:/vendor/lib64/hw"
+  if [[ -f "$TEST_LINEAR" ]]; then
+    echo
+    echo "smoke: test_linear"
+    adb shell "$GPU_ENV $RUN_DIR/test_linear"
+  fi
   echo
   echo "smoke: generate --prompt Hello --temp 0 --max-tokens 16"
-  adb shell "$RUN_DIR/generate --model '$RUN_DIR/$MODEL_NAME' --prompt Hello --temp 0 --max-tokens 16"
+  adb shell "$GPU_ENV $RUN_DIR/generate --model '$RUN_DIR/$MODEL_NAME' --prompt Hello --temp 0 --max-tokens 16"
 fi

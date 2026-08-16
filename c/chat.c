@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
         IntVec gen_ids;
         intvec_init(&gen_ids);
         GenerateState st;
-        generate_state_init(&st, model, tok, cache, max_tokens, temp, top_k, top_p);
+        generate_state_init(&st, model, tok, cache, max_tokens, temp, top_k, top_p, 0);
         generate_start(&st, prompt_ids, n_prompt);
         int tid;
         while (generate_next(&st, &tid) == 0) {

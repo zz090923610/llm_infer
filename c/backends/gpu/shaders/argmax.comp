@@ -1,0 +1,40 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(std430, binding = 0) readonly buffer XBuf { float X[]; };
+layout(std430, binding = 1) buffer OutBuf { uint Out[]; };
+
+shared float smax[64];
+shared uint sidx[64];
+
+void main() {
+    uint n = uint(pc.i0);
+    uint lid = gl_LocalInvocationID.x;
+    float m = -1.0e30;
+    uint bi = 0u;
+    for (uint i = lid; i < n; i += 64u) {
+        float v = X[i];
+        if (v > m) {
+            m = v;
+            bi = i;
+        }
+    }
+    smax[lid] = m;
+    sidx[lid] = bi;
+    barrier();
+    for (uint off = 32u; off > 0u; off >>= 1u) {
+        if (lid < off) {
+            if (smax[lid + off] > smax[lid]) {
+                smax[lid] = smax[lid + off];
+                sidx[lid] = sidx[lid + off];
+            }
+        }
+        barrier();
+    }
+    if (lid == 0u) Out[0] = sidx[0];
+}

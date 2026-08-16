@@ -1,0 +1,25 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    int i0, i1, i2, i3, i4, i5, i6, i7;
+    float f0, f1, f2, f3;
+} pc;
+
+layout(std430, binding = 0) readonly buffer SrcBuf { float Src[]; };
+layout(std430, binding = 1) buffer DstBuf { float Dst[]; };
+
+void main() {
+    uint B = uint(pc.i0), S = uint(pc.i1), H = uint(pc.i2), d = uint(pc.i3);
+    uint total = B * S * H * d;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    uint idx = gl_GlobalInvocationID.y * stride + gl_GlobalInvocationID.x;
+    if (idx >= total) return;
+    uint di = idx % d;
+    uint tmp = idx / d;
+    uint h = tmp % H;
+    tmp /= H;
+    uint s = tmp % S;
+    uint b = tmp / S;
+    Dst[(((b * S + s) * H + h) * d) + di] = Src[(((b * H + h) * S + s) * d) + di];
+}
