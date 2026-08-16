@@ -112,10 +112,13 @@ typedef struct {
 
 typedef struct {
     char *name;
-    float *data;
+    const void *data; /* mmap view, or owned f32 if `owned` */
+    int ggml_type;
     int ndim;
     int shape[8]; /* NumPy / row-major order (reversed ggml) */
     int n_elements;
+    size_t nbytes;
+    int owned; /* 1 if data was malloc'd (small / unaligned dequant) */
 } WeightTensor;
 
 typedef struct {
@@ -133,11 +136,15 @@ const GGUFValue *gguf_get(const GGUFFile *f, const char *key);
 const TensorInfo *gguf_find_tensor(const GGUFFile *f, const char *name);
 /* Bytes needed to hold every tensor as float32 after dequant. */
 size_t gguf_dequant_f32_bytes(const GGUFFile *f);
+/* Packed on-disk tensor bytes (Q8_0 / Q4_K / …). */
+size_t gguf_packed_bytes(const GGUFFile *f);
 
 int hparams_from_kv(const GGUFFile *f, LlamaHParams *hp);
 void hparams_free(LlamaHParams *hp);
 
-LoadedModel *load_model(const char *path, int dequant, int progress);
+/* load_weights=0: metadata only. load_weights=1: mmap views; 2D quantized
+   tensors stay packed and are dequantized on demand at matmul time. */
+LoadedModel *load_model(const char *path, int load_weights, int progress);
 void loaded_model_free(LoadedModel *m);
 const WeightTensor *loaded_find_weight(const LoadedModel *m, const char *name);
 

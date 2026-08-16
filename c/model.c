@@ -4,27 +4,40 @@
 #include "gdn.h"
 #include "rope.h"
 #include "tensor.h"
+#include "weight.h"
 #include "util.h"
 #include <math.h>
 #include <string.h>
 
-static const float *must_weight(LoadedModel *loaded, const char *name) {
+static const WeightTensor *must_weight(LoadedModel *loaded, const char *name) {
     const WeightTensor *w = loaded_find_weight(loaded, name);
     if (!w) die("missing weight %s", name);
-    return w->data;
+    return w;
 }
 
-static const float *opt_weight(LoadedModel *loaded, const char *name) {
+static const WeightTensor *opt_weight(LoadedModel *loaded, const char *name) {
+    return loaded_find_weight(loaded, name);
+}
+
+static const float *must_f32(LoadedModel *loaded, const char *name) {
+    return weight_f32(must_weight(loaded, name));
+}
+
+static const float *opt_f32(LoadedModel *loaded, const char *name) {
     const WeightTensor *w = loaded_find_weight(loaded, name);
-    return w ? w->data : NULL;
+    return w ? weight_f32(w) : NULL;
 }
 
 static void intern_w(const float *p, size_t bytes) {
     if (p) llm_backend_intern_weight(p, bytes);
 }
 
-static void intern_f16(const float *p, size_t bytes) {
-    if (p) llm_backend_intern_weight_f16(p, bytes);
+static void intern_mat(const WeightTensor *w) {
+    if (!w) return;
+    if (w->ggml_type == GGML_F32)
+        llm_backend_intern_weight_f16(w->data, (size_t)w->n_elements * sizeof(float));
+    else if (w->ggml_type == GGML_Q8_0)
+        llm_backend_intern_weight_q8(w, w->data, w->n_elements);
 }
 
 static void add_bias_rows(float *y, const float *bias, int n_tok, int n) {
@@ -180,18 +193,18 @@ LlamaModel *llama_model_init(LoadedModel *loaded) {
     m->hparams.tokenizer_pre = NULL;
     m->hparams.model_name = NULL;
     m->tok_embd = must_weight(loaded, "token_embd.weight");
-    m->output_norm = must_weight(loaded, "output_norm.weight");
+    m->output_norm = must_f32(loaded, "output_norm.weight");
     m->output = opt_weight(loaded, "output.weight");
     if (!m->output) m->output = m->tok_embd;
     int n_layer = m->hparams.n_layer_fwd > 0 ? m->hparams.n_layer_fwd : m->hparams.n_layer;
     m->layers = xcalloc((size_t)n_layer, sizeof(LayerWeights));
     char name[128];
     const LlamaHParams *hp = &m->hparams;
-    int D = hp->n_embd, H = hp->n_head, KV = hp->n_head_kv, d = hp->head_dim, F = hp->n_ff;
+    int D = hp->n_embd, H = hp->n_head, KV = hp->n_head_kv, d = hp->head_dim;
     for (int i = 0; i < n_layer; i++) {
         LayerWeights *L = &m->layers[i];
         snprintf(name, sizeof(name), "blk.%d.attn_norm.weight", i);
-        L->attn_norm = must_weight(loaded, name);
+        L->attn_norm = must_f32(loaded, name);
         L->is_gdn = layer_is_gdn(hp, i);
         if (L->is_gdn) {
             snprintf(name, sizeof(name), "blk.%d.attn_qkv.weight", i);
@@ -199,17 +212,17 @@ LlamaModel *llama_model_init(LoadedModel *loaded) {
             snprintf(name, sizeof(name), "blk.%d.attn_gate.weight", i);
             L->attn_gate = must_weight(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_a", i);
-            L->ssm_a = must_weight(loaded, name);
+            L->ssm_a = must_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_alpha.weight", i);
             L->ssm_alpha = must_weight(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_beta.weight", i);
             L->ssm_beta = must_weight(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_conv1d.weight", i);
-            L->ssm_conv1d = must_weight(loaded, name);
+            L->ssm_conv1d = must_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_dt.bias", i);
-            L->ssm_dt = must_weight(loaded, name);
+            L->ssm_dt = must_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_norm.weight", i);
-            L->ssm_norm = must_weight(loaded, name);
+            L->ssm_norm = must_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.ssm_out.weight", i);
             L->ssm_out = must_weight(loaded, name);
         } else {
@@ -222,23 +235,23 @@ LlamaModel *llama_model_init(LoadedModel *loaded) {
             snprintf(name, sizeof(name), "blk.%d.attn_output.weight", i);
             L->wo = must_weight(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.attn_q.bias", i);
-            L->bq = opt_weight(loaded, name);
+            L->bq = opt_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.attn_k.bias", i);
-            L->bk = opt_weight(loaded, name);
+            L->bk = opt_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.attn_v.bias", i);
-            L->bv = opt_weight(loaded, name);
+            L->bv = opt_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.attn_q_norm.weight", i);
-            L->q_norm = opt_weight(loaded, name);
+            L->q_norm = opt_f32(loaded, name);
             snprintf(name, sizeof(name), "blk.%d.attn_k_norm.weight", i);
-            L->k_norm = opt_weight(loaded, name);
+            L->k_norm = opt_f32(loaded, name);
             L->wq_out = (hp->arch == LLM_ARCH_QWEN35) ? H * 2 * d : H * d;
             L->wo_in = H * d;
         }
         snprintf(name, sizeof(name), "blk.%d.ffn_norm.weight", i);
-        L->ffn_norm = opt_weight(loaded, name);
+        L->ffn_norm = opt_f32(loaded, name);
         if (!L->ffn_norm) {
             snprintf(name, sizeof(name), "blk.%d.post_attention_norm.weight", i);
-            L->ffn_norm = must_weight(loaded, name);
+            L->ffn_norm = must_f32(loaded, name);
         }
         snprintf(name, sizeof(name), "blk.%d.ffn_gate.weight", i);
         L->gate = must_weight(loaded, name);
@@ -247,35 +260,32 @@ LlamaModel *llama_model_init(LoadedModel *loaded) {
         snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", i);
         L->down = must_weight(loaded, name);
     }
-    intern_f16(m->tok_embd, (size_t)hp->n_vocab * (size_t)D * sizeof(float));
-    if (m->output != m->tok_embd)
-        intern_f16(m->output, (size_t)hp->n_vocab * (size_t)D * sizeof(float));
+    intern_mat(m->tok_embd);
+    if (m->output != m->tok_embd) intern_mat(m->output);
     intern_w(m->output_norm, (size_t)D * sizeof(float));
     for (int i = 0; i < n_layer; i++) {
         LayerWeights *L = &m->layers[i];
         intern_w(L->attn_norm, (size_t)D * sizeof(float));
         intern_w(L->ffn_norm, (size_t)D * sizeof(float));
-        intern_f16(L->gate, (size_t)F * (size_t)D * sizeof(float));
-        intern_f16(L->up, (size_t)F * (size_t)D * sizeof(float));
-        intern_f16(L->down, (size_t)D * (size_t)F * sizeof(float));
+        intern_mat(L->gate);
+        intern_mat(L->up);
+        intern_mat(L->down);
         if (L->is_gdn) {
-            int key_dim = hp->ssm_d_state * hp->ssm_n_group;
-            int value_dim = hp->ssm_d_inner;
-            int conv_dim = 2 * key_dim + value_dim;
-            intern_f16(L->wqkv, (size_t)conv_dim * (size_t)D * sizeof(float));
-            intern_f16(L->attn_gate, (size_t)value_dim * (size_t)D * sizeof(float));
+            intern_mat(L->wqkv);
+            intern_mat(L->attn_gate);
             intern_w(L->ssm_a, (size_t)hp->ssm_dt_rank * sizeof(float));
             intern_w(L->ssm_dt, (size_t)hp->ssm_dt_rank * sizeof(float));
-            intern_f16(L->ssm_alpha, (size_t)hp->ssm_dt_rank * (size_t)D * sizeof(float));
-            intern_f16(L->ssm_beta, (size_t)hp->ssm_dt_rank * (size_t)D * sizeof(float));
-            intern_w(L->ssm_conv1d, (size_t)conv_dim * (size_t)hp->ssm_d_conv * sizeof(float));
+            intern_mat(L->ssm_alpha);
+            intern_mat(L->ssm_beta);
+            intern_w(L->ssm_conv1d, (size_t)(2 * hp->ssm_d_state * hp->ssm_n_group + hp->ssm_d_inner) *
+                                        (size_t)hp->ssm_d_conv * sizeof(float));
             intern_w(L->ssm_norm, (size_t)hp->ssm_d_state * sizeof(float));
-            intern_f16(L->ssm_out, (size_t)D * (size_t)value_dim * sizeof(float));
+            intern_mat(L->ssm_out);
         } else {
-            intern_f16(L->wq, (size_t)L->wq_out * (size_t)D * sizeof(float));
-            intern_f16(L->wk, (size_t)KV * (size_t)d * (size_t)D * sizeof(float));
-            intern_f16(L->wv, (size_t)KV * (size_t)d * (size_t)D * sizeof(float));
-            intern_f16(L->wo, (size_t)D * (size_t)L->wo_in * sizeof(float));
+            intern_mat(L->wq);
+            intern_mat(L->wk);
+            intern_mat(L->wv);
+            intern_mat(L->wo);
             intern_w(L->bq, (size_t)L->wq_out * sizeof(float));
             intern_w(L->bk, (size_t)KV * (size_t)d * sizeof(float));
             intern_w(L->bv, (size_t)KV * (size_t)d * sizeof(float));
@@ -342,11 +352,11 @@ static void full_attn_layer(LlamaModel *m, LayerWeights *L, int B, int S, int D,
         if (m->key_len[b] > max_k) max_k = m->key_len[b];
     float eps = m->hparams.rms_eps;
 
-    linear_rows(L->wq, m->h, m->y, BS, L->wq_out, D);
+    linear_rows_wt(L->wq, m->h, m->y, BS, L->wq_out, D);
     add_bias_rows(m->y, L->bq, BS, L->wq_out);
-    linear_rows(L->wk, m->h, m->ffn_gate, BS, KV * d, D);
+    linear_rows_wt(L->wk, m->h, m->ffn_gate, BS, KV * d, D);
     add_bias_rows(m->ffn_gate, L->bk, BS, KV * d);
-    linear_rows(L->wv, m->h, m->ffn_up, BS, KV * d, D);
+    linear_rows_wt(L->wv, m->h, m->ffn_up, BS, KV * d, D);
     add_bias_rows(m->ffn_up, L->bv, BS, KV * d);
 
     int gated = L->wq_out == H * 2 * d;
@@ -368,7 +378,7 @@ static void full_attn_layer(LlamaModel *m, LayerWeights *L, int B, int S, int D,
         attn_gqa(m->y, m->attn, q_bs, layer_k, layer_v, batch_stride, head_stride, m->positions,
                  m->valid_buf, m->key_len, B, H, S, KV, d, max_k, scale);
         if (gated) sigmoid_mul(m->y, g_bs, B * H * d);
-        linear_rows_add(L->wo, m->y, m->x, BS, D, L->wo_in);
+        linear_rows_add_wt(L->wo, m->y, m->x, BS, D, L->wo_in);
         return;
     }
 
@@ -389,7 +399,7 @@ static void full_attn_layer(LlamaModel *m, LayerWeights *L, int B, int S, int D,
              m->valid_buf, m->key_len, B, H, S, KV, d, max_k, scale);
     if (gated) sigmoid_mul(m->y, m->gate_buf, B * H * S * d);
     attn_merge_heads(m->y, m->h, B, S, H, d);
-    linear_rows_add(L->wo, m->h, m->x, BS, D, L->wo_in);
+    linear_rows_add_wt(L->wo, m->h, m->x, BS, D, L->wo_in);
 }
 
 float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCache *cache,
@@ -438,7 +448,7 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
         }
     }
     llm_backend_host_write(m->tok_ids);
-    embed_gather(m->tok_embd, m->tok_ids, m->x, BS, D);
+    embed_gather_wt(m->tok_embd, m->tok_ids, m->x, BS, D);
 
     size_t layer_stride = kvcache_layer_stride(cache);
     size_t batch_stride = kvcache_batch_stride(cache);
@@ -463,10 +473,10 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
         }
 
         rmsnorm_rows(m->x, L->ffn_norm, m->h, BS, D, hp->rms_eps);
-        linear_rows(L->gate, m->h, m->ffn_gate, BS, F, D);
-        linear_rows(L->up, m->h, m->ffn_up, BS, F, D);
+        linear_rows_wt(L->gate, m->h, m->ffn_gate, BS, F, D);
+        linear_rows_wt(L->up, m->h, m->ffn_up, BS, F, D);
         silu_mul(m->ffn_gate, m->ffn_up, m->ffn_gate, BS * F);
-        linear_rows_add(L->down, m->ffn_gate, m->x, BS, D, F);
+        linear_rows_add_wt(L->down, m->ffn_gate, m->x, BS, D, F);
     }
 
     rmsnorm_rows(m->x, m->output_norm, m->h, BS, D, hp->rms_eps);
@@ -476,7 +486,7 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
         if (last < 0) last = 0;
         if (last > S - 1) last = S - 1;
         const float *hlast = m->h + (size_t)(b * S + last) * (size_t)D;
-        linear_rows(m->output, hlast, logits + (size_t)b * (size_t)hp->n_vocab, 1, hp->n_vocab, D);
+        linear_rows_wt(m->output, hlast, logits + (size_t)b * (size_t)hp->n_vocab, 1, hp->n_vocab, D);
         cache->n_seq[b] = m->key_len[b];
     }
     free(vl_local);

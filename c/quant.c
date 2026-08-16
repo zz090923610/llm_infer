@@ -1,4 +1,5 @@
 #include "quant.h"
+#include "gguf.h"
 #include <string.h>
 
 float fp16_to_fp32(uint16_t h) {
@@ -26,6 +27,66 @@ float fp16_to_fp32(uint16_t h) {
     float out;
     memcpy(&out, &f, sizeof(out));
     return out;
+}
+
+int ggml_blck_size(int ggml_type) {
+    switch (ggml_type) {
+    case GGML_F32:
+        return 1;
+    case GGML_Q8_0:
+        return QK8_0;
+    case GGML_Q4_K:
+    case GGML_Q6_K:
+    case GGML_IQ4_XS:
+        return QK_K;
+    default:
+        return 0;
+    }
+}
+
+int ggml_type_size(int ggml_type) {
+    switch (ggml_type) {
+    case GGML_F32:
+        return (int)sizeof(float);
+    case GGML_Q8_0:
+        return BLOCK_Q8_0;
+    case GGML_Q4_K:
+        return BLOCK_Q4_K;
+    case GGML_Q6_K:
+        return BLOCK_Q6_K;
+    case GGML_IQ4_XS:
+        return BLOCK_IQ4_XS;
+    default:
+        return 0;
+    }
+}
+
+size_t ggml_nbytes(int ggml_type, int n_elements) {
+    int qk = ggml_blck_size(ggml_type);
+    int ts = ggml_type_size(ggml_type);
+    if (qk <= 0 || ts <= 0 || n_elements < 0 || n_elements % qk != 0) return 0;
+    return (size_t)(n_elements / qk) * (size_t)ts;
+}
+
+const void *ggml_row_data(const void *data, int ggml_type, int row, int n_in) {
+    return (const unsigned char *)data + (size_t)row * ggml_nbytes(ggml_type, n_in);
+}
+
+int dequantize_row(int ggml_type, const void *row, int n_in, float *out) {
+    switch (ggml_type) {
+    case GGML_F32:
+        return dequantize_f32(row, n_in, out);
+    case GGML_Q8_0:
+        return dequantize_q8_0(row, n_in, out);
+    case GGML_Q4_K:
+        return dequantize_q4_k(row, n_in, out);
+    case GGML_Q6_K:
+        return dequantize_q6_k(row, n_in, out);
+    case GGML_IQ4_XS:
+        return dequantize_iq4_xs(row, n_in, out);
+    default:
+        return -1;
+    }
 }
 
 int dequantize_q8_0(const void *data, int n_elements, float *out) {

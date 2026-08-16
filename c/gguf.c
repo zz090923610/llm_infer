@@ -427,6 +427,27 @@ size_t gguf_dequant_f32_bytes(const GGUFFile *f) {
     return bytes;
 }
 
+size_t gguf_packed_bytes(const GGUFFile *f) {
+    size_t bytes = 0;
+    for (int i = 0; i < f->n_tensors; i++) {
+        const TensorInfo *info = &f->tensors[i];
+        bytes += ggml_nbytes(info->ggml_type, n_elements_dims(info));
+    }
+    return bytes;
+}
+
+static const void *tensor_blob(const GGUFFile *gguf, const TensorInfo *info) {
+    return (const unsigned char *)gguf->map + gguf->data_offset + (size_t)info->offset;
+}
+
+static int row_keep_quantized(const TensorInfo *info) {
+    if (info->ggml_type == GGML_F32) return 0;
+    if (info->n_dims < 2) return 0;
+    int inner = (int)info->dims[0];
+    int qk = ggml_blck_size(info->ggml_type);
+    return qk > 0 && inner % qk == 0;
+}
+
 static float *dequant_tensor(const GGUFFile *gguf, const TensorInfo *info) {
     size_t start = gguf->data_offset + (size_t)info->offset;
     int n = n_elements_dims(info);
@@ -448,34 +469,50 @@ static float *dequant_tensor(const GGUFFile *gguf, const TensorInfo *info) {
     return flat;
 }
 
-LoadedModel *load_model(const char *path, int dequant, int progress) {
+LoadedModel *load_model(const char *path, int load_weights, int progress) {
     LoadedModel *m = xcalloc(1, sizeof(LoadedModel));
     m->gguf = open_gguf(path);
     hparams_from_kv(m->gguf, &m->hparams);
-    if (!dequant) return m;
+    if (!load_weights) return m;
     if (progress) {
-        size_t bytes = gguf_dequant_f32_bytes(m->gguf);
-        double gib = (double)bytes / (1024.0 * 1024.0 * 1024.0);
-        printf("  dequant to f32 (~%.2f GiB)\n", gib);
+        size_t packed = gguf_packed_bytes(m->gguf);
+        size_t as_f32 = gguf_dequant_f32_bytes(m->gguf);
+        printf("  mmap quantized weights (~%.2f GiB packed, f32 would be ~%.2f GiB)\n",
+               (double)packed / (1024.0 * 1024.0 * 1024.0),
+               (double)as_f32 / (1024.0 * 1024.0 * 1024.0));
         fflush(stdout);
     }
     m->n_weights = m->gguf->n_tensors;
     m->weights = xcalloc((size_t)m->n_weights, sizeof(WeightTensor));
+    int n_dequant = 0;
     for (int i = 0; i < m->n_weights; i++) {
         const TensorInfo *info = &m->gguf->tensors[i];
         WeightTensor *w = &m->weights[i];
         w->name = xstrdup(info->name);
         w->ndim = info->n_dims;
         w->n_elements = n_elements_dims(info);
+        w->ggml_type = info->ggml_type;
         for (int d = 0; d < info->n_dims; d++) w->shape[d] = (int)info->dims[info->n_dims - 1 - d];
-        w->data = dequant_tensor(m->gguf, info);
+        if (info->ggml_type == GGML_F32) {
+            w->data = tensor_blob(m->gguf, info);
+            w->nbytes = (size_t)w->n_elements * sizeof(float);
+            w->owned = 0;
+        } else if (row_keep_quantized(info)) {
+            w->data = tensor_blob(m->gguf, info);
+            w->nbytes = ggml_nbytes(info->ggml_type, w->n_elements);
+            w->owned = 0;
+        } else {
+            w->data = dequant_tensor(m->gguf, info);
+            w->ggml_type = GGML_F32;
+            w->nbytes = (size_t)w->n_elements * sizeof(float);
+            w->owned = 1;
+            n_dequant++;
+        }
         if (progress && (i + 1 == m->n_weights || (i + 1) % 40 == 0)) {
-            printf("  dequant %d/%d tensors\n", i + 1, m->n_weights);
+            printf("  load %d/%d tensors (%d small as f32)\n", i + 1, m->n_weights, n_dequant);
             fflush(stdout);
         }
     }
-    /* Weights are f32 copies; drop the Q8 mapping to free RSS. */
-    gguf_unmap(m->gguf);
     return m;
 }
 
@@ -483,7 +520,7 @@ void loaded_model_free(LoadedModel *m) {
     if (!m) return;
     for (int i = 0; i < m->n_weights; i++) {
         free(m->weights[i].name);
-        free(m->weights[i].data);
+        if (m->weights[i].owned) free((void *)m->weights[i].data);
     }
     free(m->weights);
     hparams_free(&m->hparams);

@@ -561,13 +561,12 @@ GpuBuf *gpu_intern(const void *host, size_t bytes, GpuBufKind kind) {
 
 void gpu_upload(GpuBuf *b) {
     if (!b) return;
+    if (b->kind == GPU_BUF_WEIGHT_Q8) return;
     uint64_t fp = buf_fp(b->host, b->bytes);
-    if ((b->kind == GPU_BUF_WEIGHT || b->kind == GPU_BUF_WEIGHT_F16 || b->kind == GPU_BUF_WEIGHT_Q8) &&
-        b->uploaded && b->fp == fp)
+    if ((b->kind == GPU_BUF_WEIGHT || b->kind == GPU_BUF_WEIGHT_F16) && b->uploaded && b->fp == fp)
         return;
     if (b->kind == GPU_BUF_DEVICE && b->uploaded) return;
     if (b->kind == GPU_BUF_RW && !b->need_upload && b->fp == fp) return;
-    if (b->kind == GPU_BUF_WEIGHT_Q8) return;
     if (b->kind == GPU_BUF_WEIGHT_F16) {
         const float *src = (const float *)b->host;
         uint16_t *dst = (uint16_t *)b->mapped;
@@ -607,7 +606,7 @@ void gpu_intern_q8(const void *host, const void *q8_blob, int n_elements) {
     flush_mapped(b);
     b->uploaded = 1;
     b->need_upload = 0;
-    b->fp = buf_fp(host, b->bytes);
+    b->fp = buf_fp(q8_blob, (size_t)nb * BLOCK_Q8_0);
 }
 
 void gpu_wrote(GpuBuf *b) {

@@ -6,25 +6,25 @@
 
 typedef struct {
     const float *attn_norm;
-    const float *wq;
-    const float *wk;
-    const float *wv;
-    const float *wo;
+    const WeightTensor *wq;
+    const WeightTensor *wk;
+    const WeightTensor *wv;
+    const WeightTensor *wo;
     const float *bq, *bk, *bv;
     const float *q_norm, *k_norm;
     const float *ffn_norm;
-    const float *gate;
-    const float *up;
-    const float *down;
-    const float *wqkv;
-    const float *attn_gate;
+    const WeightTensor *gate;
+    const WeightTensor *up;
+    const WeightTensor *down;
+    const WeightTensor *wqkv;
+    const WeightTensor *attn_gate;
     const float *ssm_a;
-    const float *ssm_alpha;
-    const float *ssm_beta;
+    const WeightTensor *ssm_alpha;
+    const WeightTensor *ssm_beta;
     const float *ssm_conv1d;
     const float *ssm_dt;
     const float *ssm_norm;
-    const float *ssm_out;
+    const WeightTensor *ssm_out;
     int is_gdn;
     int wq_out;
     int wo_in;
@@ -33,8 +33,8 @@ typedef struct {
 typedef struct {
     LlamaHParams hparams;
     LoadedModel *owned;
-    const float *tok_embd;
-    const float *output;
+    const WeightTensor *tok_embd;
+    const WeightTensor *output;
     const float *output_norm;
     LayerWeights *layers;
     float *rope_cos;

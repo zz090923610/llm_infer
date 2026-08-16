@@ -42,8 +42,11 @@ void llm_backend_sync(void);
    intern_weight is f32; intern_weight_f16 packs host f32 as device f16. */
 void llm_backend_intern_weight(const void *p, size_t bytes);
 void llm_backend_intern_weight_f16(const void *p, size_t bytes);
-/* gpu: intern GGUF Q8_0 bytes keyed by host f32 pointer. n_elements must be % 32 == 0. */
+/* gpu: intern GGUF Q8_0 bytes keyed by host_key (WeightTensor* or f32*).
+   n_elements must be % 32 == 0. */
 void llm_backend_intern_weight_q8(const void *host_key, const void *q8_blob, int n_elements);
+/* gpu: 1 if linear() can consume interned Q8 keyed by a WeightTensor*. */
+int llm_backend_q8_linear(void);
 
 /* gpu: CPU just wrote host memory (re-upload on next use). Other backends: no-op. */
 void llm_backend_host_write(void *p);

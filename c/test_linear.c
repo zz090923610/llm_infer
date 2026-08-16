@@ -2,6 +2,9 @@
 #include "backend.h"
 #include "attn.h"
 #include "rope.h"
+#include "weight.h"
+#include "quant.h"
+#include "gguf.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -158,6 +161,81 @@ static void check_close_f16(const float *got, const float *ref, int n, int n_in,
         }
     }
     (void)max_abs;
+}
+
+static void test_linear_q8(int n_tok, int n_out, int n_in) {
+    expect_eq(n_in % QK8_0 == 0, "q8 n_in aligned");
+    int n = n_out * n_in;
+    unsigned char *pack = malloc((size_t)(n / QK8_0) * BLOCK_Q8_0);
+    float *Wf = malloc((size_t)n * sizeof(float));
+    float *x = malloc((size_t)n_tok * (size_t)n_in * sizeof(float));
+    float *y = malloc((size_t)n_tok * (size_t)n_out * sizeof(float));
+    float *ref = malloc((size_t)n_tok * (size_t)n_out * sizeof(float));
+    expect_eq(pack && Wf && x && y && ref, "alloc linear q8");
+    if (!pack || !Wf || !x || !y || !ref) {
+        free(pack);
+        free(Wf);
+        free(x);
+        free(y);
+        free(ref);
+        return;
+    }
+    uint16_t hs = 0x3c00; /* fp16 1.0 */
+    for (int b = 0; b < n / QK8_0; b++) {
+        unsigned char *blk = pack + (size_t)b * BLOCK_Q8_0;
+        memcpy(blk, &hs, 2);
+        memset(blk + 2, 2, QK8_0); /* qs=2 → w=2 */
+    }
+    expect_eq(dequantize_q8_0(pack, n, Wf) == 0, "q8 pack dequant");
+    fill_rand(x, n_tok * n_in);
+    WeightTensor W;
+    memset(&W, 0, sizeof(W));
+    W.name = "q8W";
+    W.data = pack;
+    W.ggml_type = GGML_Q8_0;
+    W.n_elements = n;
+    W.ndim = 2;
+    W.shape[0] = n_out;
+    W.shape[1] = n_in;
+    llm_backend_intern_weight_q8(&W, pack, n);
+    linear_rows_wt(&W, x, y, n_tok, n_out, n_in);
+    llm_backend_sync();
+    for (int t = 0; t < n_tok; t++) {
+        linear_ref(Wf, x + (size_t)t * (size_t)n_in, ref + (size_t)t * (size_t)n_out, n_out, n_in);
+    }
+    char tag[80];
+    snprintf(tag, sizeof(tag), "linear_wt q8 n_tok=%d n_out=%d n_in=%d", n_tok, n_out, n_in);
+    check_close(y, ref, n_tok * n_out, n_in, tag);
+    free(pack);
+    free(Wf);
+    free(x);
+    free(y);
+    free(ref);
+}
+
+static void test_embed_q8(void) {
+    const int n_vocab = 8, d = 32;
+    unsigned char pack[8 * BLOCK_Q8_0];
+    float table[8 * 32];
+    uint16_t hs = 0x3c00;
+    for (int r = 0; r < n_vocab; r++) {
+        unsigned char *blk = pack + (size_t)r * BLOCK_Q8_0;
+        memcpy(blk, &hs, 2);
+        memset(blk + 2, (int8_t)(r + 1), QK8_0);
+    }
+    expect_eq(dequantize_q8_0(pack, n_vocab * d, table) == 0, "embed pack dequant");
+    WeightTensor W;
+    memset(&W, 0, sizeof(W));
+    W.name = "emb";
+    W.data = pack;
+    W.ggml_type = GGML_Q8_0;
+    W.n_elements = n_vocab * d;
+    int ids[3] = {0, 3, 7};
+    float out[3 * 32], ref[3 * 32];
+    embed_gather_wt(&W, ids, out, 3, d);
+    llm_backend_sync();
+    embed_gather(table, ids, ref, 3, d);
+    check_close(out, ref, 3 * d, d, "embed_gather_wt q8");
 }
 
 static void test_linear_f16_texel(int n_out, int n_in) {
@@ -427,6 +505,10 @@ int main(void) {
     test_linear_rows_add_shape(1, 16, 960);
     test_linear_rows_add_shape(4, 16, 960);
     test_linear_rows_add_shape(5, 960, 960);
+    test_linear_q8(1, 16, 64);
+    test_linear_q8(1, 16, 960);
+    test_linear_q8(4, 16, 64);
+    test_embed_q8();
     test_linear_f16_texel(960, 960);
     test_linear_f16_texel(16, 960);
     test_apply_rope();

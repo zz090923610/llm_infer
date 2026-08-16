@@ -1,5 +1,6 @@
 #include "gdn.h"
 #include "tensor.h"
+#include "weight.h"
 #include "util.h"
 #include <math.h>
 #include <string.h>
@@ -115,10 +116,10 @@ void gdn_layer_forward(const LayerWeights *L, const LlamaHParams *hp, const floa
         float *ssm_b = ssm_state + (size_t)b * (size_t)n_v_heads * (size_t)d_state * (size_t)d_state;
         for (int t = 0; t < n; t++) {
             const float *xt = x + (size_t)(b * S + t) * (size_t)D;
-            linear(L->wqkv, xt, qkv, conv_dim, D);
-            linear(L->attn_gate, xt, z, value_dim, D);
-            linear(L->ssm_beta, xt, beta, n_v_heads, D);
-            linear(L->ssm_alpha, xt, g, n_v_heads, D);
+            linear_wt(L->wqkv, xt, qkv, conv_dim, D);
+            linear_wt(L->attn_gate, xt, z, value_dim, D);
+            linear_wt(L->ssm_beta, xt, beta, n_v_heads, D);
+            linear_wt(L->ssm_alpha, xt, g, n_v_heads, D);
             for (int i = 0; i < n_v_heads; i++) {
                 beta[i] = sigmoid_f(beta[i]);
                 g[i] = softplus_f(g[i] + L->ssm_dt[i]) * L->ssm_a[i];
@@ -162,7 +163,7 @@ void gdn_layer_forward(const LayerWeights *L, const LlamaHParams *hp, const floa
                 rmsnorm(ov, L->ssm_norm, ov, d_state, eps);
                 silu_mul_inplace(ov, z + vh * d_state, d_state);
             }
-            linear(L->ssm_out, out, y + (size_t)(b * S + t) * (size_t)D, D, value_dim);
+            linear_wt(L->ssm_out, out, y + (size_t)(b * S + t) * (size_t)D, D, value_dim);
         }
     }
 }

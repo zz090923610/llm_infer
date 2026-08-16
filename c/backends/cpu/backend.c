@@ -46,6 +46,10 @@ void llm_backend_intern_weight_q8(const void *host_key, const void *q8_blob, int
     (void)n_elements;
 }
 
+int llm_backend_q8_linear(void) {
+    return 0;
+}
+
 void llm_backend_host_write(void *p) {
     (void)p;
 }

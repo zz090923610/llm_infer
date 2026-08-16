@@ -1,4 +1,5 @@
 #include "quant.h"
+#include "gguf.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -46,6 +47,7 @@ static void test_two_blocks(void) {
     memset(raw + BLOCK_Q8_0 + 2, 3, QK8_0);
     float y[QK8_0 * 2];
     expect_eq(dequantize_q8_0(raw, QK8_0 * 2, y) == 0, "dequant two blocks");
+    expect_eq(dequantize_row(GGML_Q8_0, raw, QK8_0 * 2, y) == 0, "dequant_row two blocks");
     for (int i = 0; i < QK8_0; i++) {
         if (y[i] != 1.0f) {
             fprintf(stderr, "FAIL: block0 y[%d]=%g\n", i, y[i]);

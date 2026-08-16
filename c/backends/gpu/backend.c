@@ -50,6 +50,10 @@ void llm_backend_intern_weight_q8(const void *host_key, const void *q8_blob, int
     gpu_intern_q8(host_key, q8_blob, n_elements);
 }
 
+int llm_backend_q8_linear(void) {
+    return 1;
+}
+
 void llm_backend_host_write(void *p) {
     gpu_host_write(p);
 }

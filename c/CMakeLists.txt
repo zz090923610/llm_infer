@@ -37,6 +37,7 @@ set(LLM_SOURCES
     hashmap.c
     heap.c
     quant.c
+    weight.c
     gguf.c
     unicode.c
     unicode_data.c
@@ -60,9 +61,13 @@ endif()
 if(LLM_BACKEND STREQUAL "x86_64" OR LLM_BACKEND STREQUAL "aarch64")
   find_package(Threads REQUIRED)
   target_link_libraries(llm PUBLIC Threads::Threads)
+  target_compile_definitions(llm PRIVATE LLM_HAS_POOL)
 endif()
 if(LLM_BACKEND STREQUAL "x86_64")
   target_include_directories(llm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/x86_64)
+endif()
+if(LLM_BACKEND STREQUAL "aarch64")
+  target_include_directories(llm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/aarch64)
 endif()
 if(LLM_BACKEND STREQUAL "gpu")
   target_link_libraries(llm PUBLIC ${LLM_BACKEND_LIBS})

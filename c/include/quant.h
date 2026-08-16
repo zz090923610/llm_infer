@@ -15,6 +15,12 @@
 
 float fp16_to_fp32(uint16_t h);
 
+/* ggml type layout. blck_size is elements per block; type_size is bytes per block. */
+int ggml_blck_size(int ggml_type);
+int ggml_type_size(int ggml_type);
+size_t ggml_nbytes(int ggml_type, int n_elements);
+const void *ggml_row_data(const void *data, int ggml_type, int row, int n_in);
+
 /* Dequantize packed blocks into a flat float32 vector of n_elements.
    Returns 0 on success. */
 int dequantize_q8_0(const void *data, int n_elements, float *out);
@@ -24,5 +30,9 @@ int dequantize_iq4_xs(const void *data, int n_elements, float *out);
 
 /* Read a tightly packed float32 tensor. Returns 0 on success. */
 int dequantize_f32(const void *data, int n_elements, float *out);
+
+/* Dequantize one matrix row (n_in elements). n_in must be a multiple of the
+   type's block size (or any length for F32). Returns 0 on success. */
+int dequantize_row(int ggml_type, const void *row, int n_in, float *out);
 
 #endif
