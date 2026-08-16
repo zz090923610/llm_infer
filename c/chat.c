@@ -2,6 +2,7 @@
 #include "generate.h"
 #include "gguf.h"
 #include "util.h"
+#include <time.h>
 
 #ifndef LLM_DEFAULT_MODEL
 #define LLM_DEFAULT_MODEL "../nanogpt-chat-q8_0.gguf"
@@ -135,6 +136,7 @@ int main(int argc, char **argv) {
         intvec_init(&gen_ids);
         GenerateState st;
         generate_state_init(&st, model, tok, cache, max_tokens, temp, top_k, top_p);
+        clock_t t0 = clock();
         generate_start(&st, prompt_ids, n_prompt);
         int tid;
         while (generate_next(&st, &tid) == 0) {
@@ -149,7 +151,9 @@ int main(int argc, char **argv) {
         char *tail = stream_decoder_flush(&dec);
         if (tail[0]) fputs(tail, stdout);
         free(tail);
-        fputc('\n', stdout);
+        double elapsed = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
+        double tps = elapsed > 0.0 ? (double)gen_ids.n / elapsed : 0.0;
+        printf("\n[%d tokens, %.2f tok/s]\n", gen_ids.n, tps);
         fflush(stdout);
         generate_state_free(&st);
         stream_decoder_free(&dec);

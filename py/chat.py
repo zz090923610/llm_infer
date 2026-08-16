@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from .cache import KVCache
@@ -67,6 +68,7 @@ def main() -> None:
         sys.stdout.flush()
         dec = StreamDecoder(tok, skip_special=True)
         gen_ids: list[int] = []
+        t0 = time.perf_counter()
         for tid in generate(
             model,
             tok,
@@ -85,7 +87,10 @@ def main() -> None:
         tail = dec.flush()
         if tail:
             sys.stdout.write(tail)
-        sys.stdout.write("\n")
+        elapsed = time.perf_counter() - t0
+        n = len(gen_ids)
+        tps = n / elapsed if elapsed > 0 else 0.0
+        sys.stdout.write(f"\n[{n} tokens, {tps:.2f} tok/s]\n")
         sys.stdout.flush()
         reply = tok.decode(gen_ids, skip_special=True).strip()
         for marker in (" END", "END"):
