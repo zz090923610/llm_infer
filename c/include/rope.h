@@ -1,6 +1,8 @@
 #ifndef LLM_ROPE_H
 #define LLM_ROPE_H
 
+/* Kernel contract. Implemented by the selected backend (see backend.h). */
+
 void build_rope_cache(float *cos_tab, float *sin_tab, int seq_len, int head_dim, float theta);
 
 /* x: (B, n_head, S, head_dim) in-place. positions: (B, S).

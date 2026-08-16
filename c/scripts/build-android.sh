@@ -24,13 +24,17 @@ ABI="${ANDROID_ABI:-arm64-v8a}"
 PLATFORM="${ANDROID_PLATFORM:-android-28}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
+# NEON + pthread backend for Snapdragon 8 Gen 3 (OnePlus Ace 5).
+BACKEND="${LLM_BACKEND:-aarch64}"
+
 cmake -S "$ROOT/c" -B "$BUILD_DIR" \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="$ABI" \
   -DANDROID_PLATFORM="$PLATFORM" \
   -DANDROID_STL=none \
   -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLM_BACKEND="$BACKEND"
 
 cmake --build "$BUILD_DIR" -j"$JOBS"
 

@@ -1,8 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include "generate.h"
 #include "gguf.h"
+#include "backend.h"
 #include "util.h"
 #include <time.h>
+
+static double monotonic_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
 
 #ifndef LLM_DEFAULT_MODEL
 #define LLM_DEFAULT_MODEL "../nanogpt-chat-q8_0.gguf"
@@ -10,7 +17,8 @@
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "Usage: %s [--model PATH] [--max-tokens N] [--temp F] [--top-p F] [--top-k N] [--ctx N]\n",
+            "Usage: %s [--model PATH] [--max-tokens N] [--temp F] [--top-p F] [--top-k N] [--ctx N] "
+            "[--threads N] [--prefill-threads N] [--decode-threads N]\n",
             argv0);
 }
 
@@ -42,6 +50,9 @@ int main(int argc, char **argv) {
     float top_p = 0.9f;
     int top_k = 0;
     int ctx = 2048;
+    int n_threads = 0;
+    int n_prefill = 0;
+    int n_decode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
@@ -50,6 +61,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) top_p = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
         else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) n_threads = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--prefill-threads") == 0 && i + 1 < argc) n_prefill = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--decode-threads") == 0 && i + 1 < argc) n_decode = atoi(argv[++i]);
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -59,7 +73,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (n_threads > 0) llm_backend_set_threads(n_threads);
+    if (n_prefill > 0) llm_backend_set_prefill_threads(n_prefill);
+    if (n_decode > 0) llm_backend_set_decode_threads(n_decode);
+
     printf("loading %s\n", model_path);
+    {
+        int np = llm_backend_n_prefill_threads();
+        int nd = llm_backend_n_decode_threads();
+        if (np == nd) printf("  backend %s, %d thread(s)\n", llm_backend_name(), np);
+        else printf("  backend %s, %d prefill / %d decode thread(s)\n", llm_backend_name(), np, nd);
+    }
     fflush(stdout);
     LoadedModel *loaded = load_model(model_path, 1, 1);
     LlamaModel *model = llama_model_init(loaded);
@@ -100,6 +124,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        double t0 = monotonic_now();
         if (nh >= hcap) {
             hcap = hcap ? hcap * 2 : 8;
             history = xrealloc(history, (size_t)hcap * sizeof(ChatMessage));
@@ -136,7 +161,6 @@ int main(int argc, char **argv) {
         intvec_init(&gen_ids);
         GenerateState st;
         generate_state_init(&st, model, tok, cache, max_tokens, temp, top_k, top_p);
-        clock_t t0 = clock();
         generate_start(&st, prompt_ids, n_prompt);
         int tid;
         while (generate_next(&st, &tid) == 0) {
@@ -149,9 +173,12 @@ int main(int argc, char **argv) {
             free(chunk);
         }
         char *tail = stream_decoder_flush(&dec);
-        if (tail[0]) fputs(tail, stdout);
+        if (tail[0]) {
+            fputs(tail, stdout);
+            fflush(stdout);
+        }
         free(tail);
-        double elapsed = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
+        double elapsed = monotonic_now() - t0;
         double tps = elapsed > 0.0 ? (double)gen_ids.n / elapsed : 0.0;
         printf("\n[%d tokens, %.2f tok/s]\n", gen_ids.n, tps);
         fflush(stdout);

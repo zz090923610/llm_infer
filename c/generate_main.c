@@ -1,5 +1,6 @@
 #include "generate.h"
 #include "gguf.h"
+#include "backend.h"
 #include "util.h"
 
 #ifndef LLM_DEFAULT_MODEL
@@ -9,7 +10,7 @@
 static void usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--prompt TEXT] [--max-tokens N] [--temp F] [--top-p F] "
-            "[--top-k N] [--batch-demo]\n",
+            "[--top-k N] [--threads N] [--prefill-threads N] [--decode-threads N] [--batch-demo]\n",
             argv0);
 }
 
@@ -21,6 +22,9 @@ int main(int argc, char **argv) {
     float top_p = 0.9f;
     int top_k = 0;
     int batch_demo = 0;
+    int n_threads = 0;
+    int n_prefill = 0;
+    int n_decode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
@@ -29,6 +33,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) temp = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) top_p = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) n_threads = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--prefill-threads") == 0 && i + 1 < argc) n_prefill = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--decode-threads") == 0 && i + 1 < argc) n_decode = atoi(argv[++i]);
         else if (strcmp(argv[i], "--batch-demo") == 0) batch_demo = 1;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
@@ -39,7 +46,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (n_threads > 0) llm_backend_set_threads(n_threads);
+    if (n_prefill > 0) llm_backend_set_prefill_threads(n_prefill);
+    if (n_decode > 0) llm_backend_set_decode_threads(n_decode);
+
     printf("loading %s\n", model_path);
+    {
+        int np = llm_backend_n_prefill_threads();
+        int nd = llm_backend_n_decode_threads();
+        if (np == nd) printf("  backend %s, %d thread(s)\n", llm_backend_name(), np);
+        else printf("  backend %s, %d prefill / %d decode thread(s)\n", llm_backend_name(), np, nd);
+    }
     fflush(stdout);
     LoadedModel *loaded = load_model(model_path, 1, 1);
     LlamaModel *model = llama_model_init(loaded);

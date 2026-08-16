@@ -1,0 +1,16 @@
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+  message(FATAL_ERROR
+          "LLM_BACKEND=x86_64 requires an x86_64 host (got ${CMAKE_SYSTEM_PROCESSOR}). "
+          "Use -DLLM_BACKEND=cpu")
+endif()
+
+set(LLM_BACKEND_COMPILE_OPTIONS -mavx2 -mfma PARENT_SCOPE)
+
+set(LLM_BACKEND_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/backend.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/pool.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/tensor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/rope.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/attn.c
+    PARENT_SCOPE
+)

@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+/* Kernel contract. Implemented by the selected backend (see backend.h). */
+
 /* y = W @ x  for one vector. W is (n_out, n_in) row-major. */
 void linear(const float *W, const float *x, float *y, int n_out, int n_in);
 

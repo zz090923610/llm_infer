@@ -1,4 +1,5 @@
 #include "model.h"
+#include "attn.h"
 #include "rope.h"
 #include "tensor.h"
 #include "util.h"
@@ -135,17 +136,12 @@ KVCache *llama_model_new_cache(LlamaModel *m, int batch, int max_seq) {
     return kvcache_create(&m->hparams, batch, max_seq);
 }
 
-static size_t q_index(int b, int h, int s, int B, int H, int S, int d) {
-    (void)B;
-    return ((((size_t)b * (size_t)H + (size_t)h) * (size_t)S + (size_t)s) * (size_t)d);
-}
-
 float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCache *cache,
                            const int *valid_len, float *logits_out) {
     const LlamaHParams *hp = &m->hparams;
     int D = hp->n_embd, H = hp->n_head, KV = hp->n_head_kv, d = hp->head_dim, F = hp->n_ff;
-    int n_rep = H / KV;
     float scale = 1.0f / sqrtf((float)d);
+    int BS = B * S;
 
     int *vl_local = NULL;
     if (!valid_len) {
@@ -187,125 +183,51 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
 
     for (int li = 0; li < hp->n_layer; li++) {
         LayerWeights *L = &m->layers[li];
-        rmsnorm_rows(m->x, L->attn_norm, m->h, B * S, D, hp->rms_eps);
+        rmsnorm_rows(m->x, L->attn_norm, m->h, BS, D, hp->rms_eps);
 
-        /* q,k,v projections then pack as (B, heads, S, d) */
-        for (int b = 0; b < B; b++) {
-            for (int s = 0; s < S; s++) {
-                const float *xin = m->h + (size_t)(b * S + s) * (size_t)D;
-                float *qtmp = m->y + (size_t)(b * S + s) * (size_t)(H * d); /* reuse y as q_lin */
-                linear(L->wq, xin, qtmp, H * d, D);
-                float *ktmp = m->ffn_gate + (size_t)(b * S + s) * (size_t)(KV * d);
-                linear(L->wk, xin, ktmp, KV * d, D);
-                float *vtmp = m->ffn_up + (size_t)(b * S + s) * (size_t)(KV * d);
-                linear(L->wv, xin, vtmp, KV * d, D);
-            }
-        }
-        /* ffn_gate/up used as k_lin/v_lin; y as q_lin. Scatter into q,k,v. */
-        for (int b = 0; b < B; b++) {
-            for (int s = 0; s < S; s++) {
-                const float *qlin = m->y + (size_t)(b * S + s) * (size_t)(H * d);
-                for (int h = 0; h < H; h++) {
-                    memcpy(m->q + q_index(b, h, s, B, H, S, d), qlin + h * d, (size_t)d * sizeof(float));
-                }
-                const float *klin = m->ffn_gate + (size_t)(b * S + s) * (size_t)(KV * d);
-                const float *vlin = m->ffn_up + (size_t)(b * S + s) * (size_t)(KV * d);
-                for (int h = 0; h < KV; h++) {
-                    memcpy(m->k + q_index(b, h, s, B, KV, S, d), klin + h * d, (size_t)d * sizeof(float));
-                    memcpy(m->v + q_index(b, h, s, B, KV, S, d), vlin + h * d, (size_t)d * sizeof(float));
-                }
-            }
-        }
+        /* q,k,v projections; reuse y / ffn_gate / ffn_up as q_lin / k_lin / v_lin */
+        linear_rows(L->wq, m->h, m->y, BS, H * d, D);
+        linear_rows(L->wk, m->h, m->ffn_gate, BS, KV * d, D);
+        linear_rows(L->wv, m->h, m->ffn_up, BS, KV * d, D);
+        attn_pack_heads(m->y, m->q, B, S, H, d);
+        attn_pack_heads(m->ffn_gate, m->k, B, S, KV, d);
+        attn_pack_heads(m->ffn_up, m->v, B, S, KV, d);
 
         apply_rope(m->q, m->rope_cos, m->rope_sin, m->positions, B, H, S, d);
         apply_rope(m->k, m->rope_cos, m->rope_sin, m->positions, B, KV, S, d);
 
-        for (int b = 0; b < B; b++) {
-            int n = valid_len[b];
-            int s0 = m->starts[b];
-            for (int h = 0; h < KV; h++) {
-                for (int t = 0; t < n; t++) {
-                    float *dst_k = cache->k + (size_t)li * layer_stride + (size_t)b * batch_stride +
-                                   (size_t)h * head_stride + (size_t)(s0 + t) * (size_t)d;
-                    float *dst_v = cache->v + (size_t)li * layer_stride + (size_t)b * batch_stride +
-                                   (size_t)h * head_stride + (size_t)(s0 + t) * (size_t)d;
-                    memcpy(dst_k, m->k + q_index(b, h, t, B, KV, S, d), (size_t)d * sizeof(float));
-                    memcpy(dst_v, m->v + q_index(b, h, t, B, KV, S, d), (size_t)d * sizeof(float));
-                }
-            }
-        }
+        float *layer_k = cache->k + (size_t)li * layer_stride;
+        float *layer_v = cache->v + (size_t)li * layer_stride;
+        attn_cache_store(layer_k, layer_v, m->k, m->v, batch_stride, head_stride, valid_len,
+                         m->starts, B, S, KV, d);
 
         int max_k = 0;
         for (int b = 0; b < B; b++)
             if (m->key_len[b] > max_k) max_k = m->key_len[b];
 
-        /* attention */
-        for (int b = 0; b < B; b++) {
-            for (int h = 0; h < H; h++) {
-                int kv_h = h / n_rep;
-                for (int s = 0; s < S; s++) {
-                    float *row = m->attn + ((((size_t)b * H + (size_t)h) * (size_t)S + (size_t)s) * (size_t)max_k);
-                    int qpos = m->positions[b * S + s];
-                    int q_valid = s < valid_len[b];
-                    const float *qrow = m->q + q_index(b, h, s, B, H, S, d);
-                    for (int kp = 0; kp < max_k; kp++) {
-                        if (!q_valid || kp > qpos || kp >= m->key_len[b]) {
-                            row[kp] = -INFINITY;
-                            continue;
-                        }
-                        const float *krow = cache->k + (size_t)li * layer_stride + (size_t)b * batch_stride +
-                                            (size_t)kv_h * head_stride + (size_t)kp * (size_t)d;
-                        float acc = 0.0f;
-                        for (int i = 0; i < d; i++) acc += qrow[i] * krow[i];
-                        row[kp] = acc * scale;
-                    }
-                    softmax_inplace(row, max_k);
-                    float *yrow = m->y + q_index(b, h, s, B, H, S, d);
-                    memset(yrow, 0, (size_t)d * sizeof(float));
-                    for (int kp = 0; kp < max_k; kp++) {
-                        float p = row[kp];
-                        if (p == 0.0f) continue;
-                        const float *vrow = cache->v + (size_t)li * layer_stride + (size_t)b * batch_stride +
-                                            (size_t)kv_h * head_stride + (size_t)kp * (size_t)d;
-                        for (int i = 0; i < d; i++) yrow[i] += p * vrow[i];
-                    }
-                }
-            }
+        attn_gqa(m->y, m->attn, m->q, layer_k, layer_v, batch_stride, head_stride, m->positions,
+                 valid_len, m->key_len, B, H, S, KV, d, max_k, scale);
+
+        attn_merge_heads(m->y, m->h, B, S, H, d);
+        linear_rows(L->wo, m->h, m->ffn_gate, BS, D, D);
+        for (int i = 0; i < BS; i++) {
+            float *xr = m->x + (size_t)i * (size_t)D;
+            vec_add(xr, m->ffn_gate + (size_t)i * (size_t)D, xr, D);
         }
 
-        /* merge heads -> (B,S,D) in h, then x += y @ wo.T */
-        for (int b = 0; b < B; b++) {
-            for (int s = 0; s < S; s++) {
-                float *merged = m->h + (size_t)(b * S + s) * (size_t)D;
-                for (int h = 0; h < H; h++) {
-                    memcpy(merged + h * d, m->y + q_index(b, h, s, B, H, S, d), (size_t)d * sizeof(float));
-                }
-                float *proj = m->ffn_gate + (size_t)(b * S + s) * (size_t)D;
-                linear(L->wo, merged, proj, D, D);
-                float *xr = m->x + (size_t)(b * S + s) * (size_t)D;
-                vec_add(xr, proj, xr, D);
-            }
-        }
-
-        rmsnorm_rows(m->x, L->ffn_norm, m->h, B * S, D, hp->rms_eps);
-        for (int b = 0; b < B; b++) {
-            for (int s = 0; s < S; s++) {
-                const float *hin = m->h + (size_t)(b * S + s) * (size_t)D;
-                float *g = m->ffn_gate + (size_t)(b * S + s) * (size_t)F;
-                float *u = m->ffn_up + (size_t)(b * S + s) * (size_t)F;
-                linear(L->gate, hin, g, F, D);
-                silu(g, g, F);
-                linear(L->up, hin, u, F, D);
-                vec_mul(g, u, g, F);
-                float *down = m->y + (size_t)(b * S + s) * (size_t)D;
-                linear(L->down, g, down, D, F);
-                float *xr = m->x + (size_t)(b * S + s) * (size_t)D;
-                vec_add(xr, down, xr, D);
-            }
+        rmsnorm_rows(m->x, L->ffn_norm, m->h, BS, D, hp->rms_eps);
+        linear_rows(L->gate, m->h, m->ffn_gate, BS, F, D);
+        silu(m->ffn_gate, m->ffn_gate, BS * F);
+        linear_rows(L->up, m->h, m->ffn_up, BS, F, D);
+        vec_mul(m->ffn_gate, m->ffn_up, m->ffn_gate, BS * F);
+        linear_rows(L->down, m->ffn_gate, m->y, BS, D, F);
+        for (int i = 0; i < BS; i++) {
+            float *xr = m->x + (size_t)i * (size_t)D;
+            vec_add(xr, m->y + (size_t)i * (size_t)D, xr, D);
         }
     }
 
-    rmsnorm_rows(m->x, m->output_norm, m->h, B * S, D, hp->rms_eps);
+    rmsnorm_rows(m->x, m->output_norm, m->h, BS, D, hp->rms_eps);
     float *logits = logits_out ? logits_out : m->logits;
     for (int b = 0; b < B; b++) {
         int last = valid_len[b] - 1;

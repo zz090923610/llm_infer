@@ -1,6 +1,12 @@
 #include "generate.h"
 #include <time.h>
 
+static double monotonic_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 static int is_stop(Tokenizer *tok, int tid) {
     for (int i = 0; i < tok->n_stop; i++)
         if (tok->stop_ids[i] == tid) return 1;
@@ -61,7 +67,7 @@ char *generate_text(LlamaModel *model, Tokenizer *tok, const char *prompt, int m
     stream_decoder_init(&dec, tok, 1);
     ByteVec pieces;
     bytevec_init(&pieces);
-    clock_t t0 = clock();
+    double t0 = monotonic_now();
     generate_start(&st, ids.data, ids.n);
     int n = 0;
     int tid;
@@ -83,7 +89,7 @@ char *generate_text(LlamaModel *model, Tokenizer *tok, const char *prompt, int m
     }
     free(tail);
     if (stream) {
-        double elapsed = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
+        double elapsed = monotonic_now() - t0;
         double tps = elapsed > 0.0 ? (double)n / elapsed : 0.0;
         printf("\n[%d tokens, %.2f tok/s]\n", n, tps);
         fflush(stdout);

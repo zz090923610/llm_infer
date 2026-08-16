@@ -337,7 +337,7 @@ flowchart LR
     outNorm --> logits[last_token_logits]
 ```
 
-### 3.2 `tensor.c` / `tensor.h`
+### 3.2 `backends/cpu/tensor.c` / `tensor.h`
 
 No tensor object. Everything is `float *` plus explicit sizes.
 
@@ -351,12 +351,14 @@ No tensor object. Everything is `float *` plus explicit sizes.
 | `vec_add` / `vec_mul` | Residual add; SwiGLU product |
 | `argmax_f32` | Greedy sample |
 
-### 3.3 `rope.c` / `rope.h`
+### 3.3 `backends/cpu/rope.c` / `rope.h`
 
 - `build_rope_cache(cos, sin, seq_len, head_dim, theta)` — tables used by every layer.
 - `apply_rope(x, cos, sin, positions, B, n_head, S, head_dim)` — in-place on `x` shaped `(B, n_head, S, head_dim)`. `positions` is `(B, S)`.
 
 Decode (`S=1`) still gets the right rotation because `positions[b,0] = cache.n_seq[b]`, not 0.
+
+Attention kernels live in `backends/cpu/attn.c` (`attn_pack_heads`, `attn_cache_store`, `attn_gqa`, `attn_merge_heads`). `model.c` is the layer graph; `-DLLM_BACKEND=cpu` selects this scalar backend.
 
 ### 3.4 `cache.c` / `cache.h`
 
@@ -726,9 +728,11 @@ No hidden framework. If you see `intvec_push` in generate/chat/tokenizer, this i
 
 ### 6.2 CMake ([`c/CMakeLists.txt`](c/CMakeLists.txt))
 
-**In `lib llm` (15 sources):**
+**In `lib llm`:**
 
-`util.c`, `hashmap.c`, `heap.c`, `tensor.c`, `quant.c`, `gguf.c`, `unicode.c`, `unicode_data.c`, `tokenizer.c`, `rope.c`, `cache.c`, `model.c`, `sampler.c`, `generate.c`
+Core: `util.c`, `hashmap.c`, `heap.c`, `quant.c`, `gguf.c`, `unicode.c`, `unicode_data.c`, `tokenizer.c`, `cache.c`, `model.c`, `sampler.c`, `generate.c`
+
+CPU backend (`c/backends/cpu/`, `-DLLM_BACKEND=cpu`): `backend.c`, `tensor.c`, `rope.c`, `attn.c`
 
 **Not in the library:**
 
@@ -773,17 +777,20 @@ The process still needs ~1.35 GiB free RAM for f32 weights, plus the KV cache.
 | `c/include/quant.h` + `c/quant.c` | Q8_0 / f32 / fp16 |
 | `c/include/gguf.h` + `c/gguf.c` | GGUF v3 mmap + dequant load |
 | `c/include/tokenizer.h` + `c/tokenizer.c` | ChatML, pretok, BPE, stream decode |
-| `c/include/tensor.h` + `c/tensor.c` | linear, RMSNorm, SiLU, softmax |
-| `c/include/rope.h` + `c/rope.c` | Consecutive-pair RoPE |
+| `c/include/backend.h` + `c/backends/cpu/backend.c` | Compile-time backend name |
+| `c/include/tensor.h` + `c/backends/cpu/tensor.c` | linear, RMSNorm, SiLU, softmax |
+| `c/include/rope.h` + `c/backends/cpu/rope.c` | Consecutive-pair RoPE |
+| `c/include/attn.h` + `c/backends/cpu/attn.c` | GQA attention, head pack/merge, KV store |
 | `c/include/cache.h` + `c/cache.c` | K/V arena + `n_seq` |
-| `c/include/model.h` + `c/model.c` | Llama forward |
+| `c/include/model.h` + `c/model.c` | Llama forward (calls backend kernels) |
 | `c/include/sampler.h` + `c/sampler.c` | Greedy / temp / top-k / top-p |
 | `c/include/generate.h` + `c/generate.c` | Prefill/decode loop |
 | `c/generate_main.c` | One-shot CLI |
 | `c/chat.c` | Multi-turn + prefix cache |
 | `c/test_quant.c` | Q8_0 block tests |
 | `c/test_tokenizer.c` | Roundtrip + ChatML specials |
-| `c/CMakeLists.txt` | lib + bins + host tests |
+| `c/CMakeLists.txt` | lib + bins + host tests; `-DLLM_BACKEND` |
+| `c/backends/cpu/CMakeLists.txt` | Scalar CPU kernel sources |
 | `c/scripts/build-android.sh` | NDK cross-compile |
 | `c/scripts/adb-push.sh` | adb deploy + linker64 hint |
 | `py/*.py` | NumPy reference (optional) |

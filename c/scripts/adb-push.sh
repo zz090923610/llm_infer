@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Push Android arm64 binaries and the GGUF to the phone Downloads folder
-# (visible in Files as Download/llm_infer). Shared storage is usually noexec,
-# so run via /system/bin/linker64 rather than ./generate.
+# (visible in Files as Download/llm_infer). /sdcard is FUSE+noexec, so run
+# the same files via /mnt/pass_through/... instead of ./chat or linker64.
 # Usage: adb-push.sh [--run] [--model PATH] [--build-dir DIR]
 set -euo pipefail
 
@@ -9,6 +9,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="$ROOT/c/build-android"
 MODEL="$ROOT/nanogpt-chat-q8_0.gguf"
 REMOTE="/sdcard/Download/llm_infer"
+# Same directory as $REMOTE, but on the f2fs pass-through. /sdcard is FUSE+noexec,
+# so ./chat and linker64 both fail there (Permission denied / map segment EPERM).
+RUN_DIR="/mnt/pass_through/0/emulated/0/Download/llm_infer"
 RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -48,22 +51,21 @@ if [[ ! -f "$MODEL" ]]; then
 fi
 
 MODEL_NAME="$(basename "$MODEL")"
-LINKER="/system/bin/linker64"
 
 echo "pushing to $REMOTE (Files app: Download/llm_infer)"
 adb shell "mkdir -p '$REMOTE'"
 adb push "$CHAT" "$REMOTE/chat"
 adb push "$GEN" "$REMOTE/generate"
 adb push "$MODEL" "$REMOTE/$MODEL_NAME"
+adb shell "chmod 755 '$RUN_DIR/chat' '$RUN_DIR/generate'"
 
-echo "on device (sdcard is usually noexec; use linker64):"
+echo "on device (run via pass-through; /sdcard is FUSE noexec):"
 echo "  adb shell -t"
-echo "  cd $REMOTE"
-echo "  $LINKER ./generate --model ./$MODEL_NAME --prompt \"Hello\" --temp 0 --max-tokens 32"
-echo "  $LINKER ./chat --model ./$MODEL_NAME --ctx 1024"
+echo "  $RUN_DIR/generate --model $RUN_DIR/$MODEL_NAME --prompt \"Hello\" --temp 0 --max-tokens 32"
+echo "  $RUN_DIR/chat --model $RUN_DIR/$MODEL_NAME --ctx 1024"
 
 if [[ "$RUN" -eq 1 ]]; then
   echo
   echo "smoke: generate --prompt Hello --temp 0 --max-tokens 16"
-  adb shell "cd '$REMOTE' && $LINKER ./generate --model './$MODEL_NAME' --prompt Hello --temp 0 --max-tokens 16"
+  adb shell "$RUN_DIR/generate --model '$RUN_DIR/$MODEL_NAME' --prompt Hello --temp 0 --max-tokens 16"
 fi
