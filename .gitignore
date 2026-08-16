@@ -31,7 +31,7 @@ htmlcov/
 .tox/
 .nox/
 
-# C / CMake
+# C / CMake / Ninja
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
@@ -42,16 +42,24 @@ LastTest.log
 Testing/
 Makefile
 compile_commands.json
+CMakeUserPresets.json
+install_manifest.txt
+build.ninja
+.ninja_deps
+.ninja_log
 *.o
 *.a
 *.out
 *.exe
+*.dll
+*.dylib
+*.lib
 *.d
 *.dSYM/
 
-# In-tree / IDE CMake build dirs
+# Out-of-tree CMake dirs: c/build, c/build-android, c/build-android-gpu, c/build-x86, ...
 c/build/
-c/build-android/
+c/build-*/
 c/cmake-build-*/
 cmake-build-*/
 
@@ -60,6 +68,10 @@ c/chat
 c/generate
 c/test_quant
 c/test_tokenizer
+c/test_linear
+
+# glslang SPIR-V blobs from shaders/compile.sh (shaders_spv.h is the committed embed)
+c/backends/gpu/shaders/*.spv
 
 # Third-party clones (llama.cpp is its own git repo)
 /3rd/
