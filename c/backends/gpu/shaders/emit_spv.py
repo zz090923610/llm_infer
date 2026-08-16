@@ -1190,6 +1190,7 @@ def shader_cache_store() -> bytes:
 
 
 def shader_attn() -> bytes:
+    """GQA attention. Each of 64 threads covers dims lid, lid+64, ... so d>64 works."""
     c = Comp(7, shared_n=64, use_global=True)
     ensure_cu(c)
     c.begin_main()
@@ -1214,44 +1215,51 @@ def shader_attn() -> bytes:
         n_rep = c.udiv(n_head, n_kv)
         kv_h = c.udiv(h, n_rep)
         qbase = c.umul(c.uadd(c.umul(c.uadd(c.umul(b, n_head), h), S), sidx), d)
-        qv = c.select(c.ult(lid, d), c.load_f(1, c.uadd(qbase, lid)), c.f0)
-        c.sh_store(0, lid, qv)
-        c.barrier()
+
+        def dim_zero(i, car):
+            c.store_f(0, c.uadd(qbase, i), c.f0)
+            return {}
 
         def invalid():
-            def z():
-                c.store_f(0, c.uadd(qbase, lid), c.f0)
-
-            c.if_(c.ult(lid, d), z)
+            c.for_u(lid, d, 64, dim_zero)
 
         def valid():
             klen = c.load_i(6, b)
             kbase0 = c.uadd(c.umul(b, batch_stride), c.umul(kv_h, head_stride))
+            c.for_u(lid, d, 64, dim_zero)
+            c.barrier()
 
             def kloop(kp_u, car):
                 kp_i = c.bitcast_i(kp_u)
                 vis = c.land(c.sle(kp_i, qpos), c.slt(kp_i, klen))
                 kbase = c.uadd(kbase0, c.umul(kp_u, d))
-                prod = c.select(
-                    c.ult(lid, d),
-                    c.fmul(c.sh_load(0, lid), c.load_f(2, c.uadd(kbase, lid))),
-                    c.f0,
-                )
-                c.sh_store(1, lid, prod)
+
+                def dot_body(i, dcar):
+                    qv = c.load_f(1, c.uadd(qbase, i))
+                    kv = c.load_f(2, c.uadd(kbase, i))
+                    return {"p": c.fadd(dcar["p"], c.fmul(qv, kv))}
+
+                dfin = c.for_u(lid, d, 64, dot_body, {"p": (c.f32, c.f0)})
+                c.sh_store(0, lid, dfin["p"])
                 c.barrier()
-                reduce_unrolled(c, lid, 1, "add")
-                score = c.select(vis, c.fmul(c.sh_load(1, c.cu[0]), scale), c.f_bigneg)
+                reduce_unrolled(c, lid, 0, "add")
+                score = c.select(vis, c.fmul(c.sh_load(0, c.cu[0]), scale), c.f_bigneg)
                 m = car["m"]
                 lsum = car["l"]
-                acc = car["acc"]
                 m_new = c.fmax(m, score)
                 e = c.exp(c.fsub(score, m_new))
                 alpha = c.exp(c.fsub(m, m_new))
-                v = c.select(c.ult(lid, d), c.load_f(3, c.uadd(kbase, lid)), c.f0)
-                acc2 = c.fadd(c.fmul(acc, alpha), c.fmul(e, v))
+
+                def vacc(i, vcar):
+                    yi = c.load_f(0, c.uadd(qbase, i))
+                    vv = c.load_f(3, c.uadd(kbase, i))
+                    c.store_f(0, c.uadd(qbase, i), c.fadd(c.fmul(yi, alpha), c.fmul(e, vv)))
+                    return {}
+
+                c.for_u(lid, d, 64, vacc)
                 l2 = c.fadd(c.fmul(lsum, alpha), e)
                 c.barrier()
-                return {"m": m_new, "l": l2, "acc": acc2}
+                return {"m": m_new, "l": l2}
 
             max_ku = c.bitcast_u(max_k)
             fin = c.for_u(
@@ -1259,14 +1267,16 @@ def shader_attn() -> bytes:
                 max_ku,
                 1,
                 kloop,
-                {"m": (c.f32, c.f_bigneg), "l": (c.f32, c.f0), "acc": (c.f32, c.f0)},
+                {"m": (c.f32, c.f_bigneg), "l": (c.f32, c.f0)},
             )
+            inv = c.select(c.fgt(fin["l"], c.f0), c.fdiv(c.f1, fin["l"]), c.f0)
 
-            def wr():
-                y = c.select(c.fgt(fin["l"], c.f0), c.fdiv(fin["acc"], fin["l"]), c.f0)
-                c.store_f(0, c.uadd(qbase, lid), y)
+            def wr(i, car):
+                yi = c.load_f(0, c.uadd(qbase, i))
+                c.store_f(0, c.uadd(qbase, i), c.fmul(yi, inv))
+                return {}
 
-            c.if_(c.ult(lid, d), wr)
+            c.for_u(lid, d, 64, wr)
 
         c.if_(q_valid, valid, invalid)
 

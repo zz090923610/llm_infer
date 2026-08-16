@@ -19,6 +19,8 @@ static void llm_pool_run(llm_pool_fn fn, void *ctx, int n) {
 
 #if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 const float *weight_f32(const WeightTensor *w) {
@@ -97,6 +99,93 @@ static void dots4_f32(const float *w, const float *x0, const float *x1, const fl
         a3 = _mm256_fmadd_ps(vw, _mm256_loadu_ps(x3 + j), a3);
     }
     float t0 = hsum256(a0), t1 = hsum256(a1), t2 = hsum256(a2), t3 = hsum256(a3);
+    for (; j < n; j++) {
+        float wv = w[j];
+        t0 += wv * x0[j];
+        t1 += wv * x1[j];
+        t2 += wv * x2[j];
+        t3 += wv * x3[j];
+    }
+    *s0 = t0;
+    *s1 = t1;
+    *s2 = t2;
+    *s3 = t3;
+}
+#elif defined(__aarch64__)
+static float hsum128(float32x4_t v) {
+    return vaddvq_f32(v);
+}
+
+static float dot_f32(const float *a, const float *b, int n) {
+    float32x4_t a0 = vdupq_n_f32(0.0f);
+    float32x4_t a1 = vdupq_n_f32(0.0f);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        a0 = vfmaq_f32(a0, vld1q_f32(a + i), vld1q_f32(b + i));
+        a1 = vfmaq_f32(a1, vld1q_f32(a + i + 4), vld1q_f32(b + i + 4));
+    }
+    float s = hsum128(vaddq_f32(a0, a1));
+    for (; i < n; i++) s += a[i] * b[i];
+    return s;
+}
+
+static float vec_dot_q8_0(const void *vx, const float *y, int n) {
+    const unsigned char *p = (const unsigned char *)vx;
+    int nb = n / QK8_0;
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    for (int i = 0; i < nb; i++) {
+        uint16_t hs;
+        memcpy(&hs, p, 2);
+        float32x4_t vd = vdupq_n_f32(fp16_to_fp32(hs));
+        const int8_t *q = (const int8_t *)(p + 2);
+        int8x16_t q0 = vld1q_s8(q);
+        int8x16_t q1 = vld1q_s8(q + 16);
+        int16x8_t s0 = vmovl_s8(vget_low_s8(q0));
+        int16x8_t s1 = vmovl_s8(vget_high_s8(q0));
+        int16x8_t s2 = vmovl_s8(vget_low_s8(q1));
+        int16x8_t s3 = vmovl_s8(vget_high_s8(q1));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s0)))),
+                        vld1q_f32(y + 0));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s0)))),
+                        vld1q_f32(y + 4));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s1)))),
+                        vld1q_f32(y + 8));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s1)))),
+                        vld1q_f32(y + 12));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s2)))),
+                        vld1q_f32(y + 16));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s2)))),
+                        vld1q_f32(y + 20));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s3)))),
+                        vld1q_f32(y + 24));
+        acc = vfmaq_f32(acc, vmulq_f32(vd, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s3)))),
+                        vld1q_f32(y + 28));
+        p += BLOCK_Q8_0;
+        y += QK8_0;
+    }
+    return hsum128(acc);
+}
+
+static void dots4_f32(const float *w, const float *x0, const float *x1, const float *x2,
+                      const float *x3, float *s0, float *s1, float *s2, float *s3, int n) {
+    float32x4_t a0 = vdupq_n_f32(0.0f);
+    float32x4_t a1 = vdupq_n_f32(0.0f);
+    float32x4_t a2 = vdupq_n_f32(0.0f);
+    float32x4_t a3 = vdupq_n_f32(0.0f);
+    int j = 0;
+    for (; j + 8 <= n; j += 8) {
+        float32x4_t vw0 = vld1q_f32(w + j);
+        float32x4_t vw1 = vld1q_f32(w + j + 4);
+        a0 = vfmaq_f32(a0, vw0, vld1q_f32(x0 + j));
+        a1 = vfmaq_f32(a1, vw0, vld1q_f32(x1 + j));
+        a2 = vfmaq_f32(a2, vw0, vld1q_f32(x2 + j));
+        a3 = vfmaq_f32(a3, vw0, vld1q_f32(x3 + j));
+        a0 = vfmaq_f32(a0, vw1, vld1q_f32(x0 + j + 4));
+        a1 = vfmaq_f32(a1, vw1, vld1q_f32(x1 + j + 4));
+        a2 = vfmaq_f32(a2, vw1, vld1q_f32(x2 + j + 4));
+        a3 = vfmaq_f32(a3, vw1, vld1q_f32(x3 + j + 4));
+    }
+    float t0 = hsum128(a0), t1 = hsum128(a1), t2 = hsum128(a2), t3 = hsum128(a3);
     for (; j < n; j++) {
         float wv = w[j];
         t0 += wv * x0[j];
@@ -237,8 +326,8 @@ static void qlinear(const WeightTensor *W, const float *x, float *y, int n_tok, 
     llm_backend_host_write(y);
 }
 
-static int use_device_q8(const WeightTensor *W) {
-    return W && W->ggml_type == GGML_Q8_0 && llm_backend_q8_linear();
+static int use_device_quant(const WeightTensor *W) {
+    return W && llm_backend_quant_linear(W->ggml_type);
 }
 
 void linear_wt(const WeightTensor *W, const float *x, float *y, int n_out, int n_in) {
@@ -251,7 +340,7 @@ void linear_rows_wt(const WeightTensor *W, const float *x, float *y, int n_tok, 
         linear_rows((const float *)W->data, x, y, n_tok, n_out, n_in);
         return;
     }
-    if (use_device_q8(W)) {
+    if (use_device_quant(W)) {
         linear_rows((const float *)W, x, y, n_tok, n_out, n_in);
         return;
     }
@@ -265,7 +354,7 @@ void linear_rows_add_wt(const WeightTensor *W, const float *x, float *y, int n_t
         linear_rows_add((const float *)W->data, x, y, n_tok, n_out, n_in);
         return;
     }
-    if (use_device_q8(W)) {
+    if (use_device_quant(W)) {
         linear_rows_add((const float *)W, x, y, n_tok, n_out, n_in);
         return;
     }

@@ -1,4 +1,5 @@
 #include "rope.h"
+#include "backend.h"
 #include "util.h"
 #include <math.h>
 
@@ -32,6 +33,7 @@ void apply_rope_neox(float *x, const float *cos_tab, const float *sin_tab, const
     if (n_rot <= 0) n_rot = head_dim;
     if (n_rot > head_dim) n_rot = head_dim;
     int half = n_rot / 2;
+    llm_backend_host_read(x);
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < n_head; h++) {
             for (int s = 0; s < S; s++) {
@@ -63,4 +65,5 @@ void apply_rope_neox(float *x, const float *cos_tab, const float *sin_tab, const
             }
         }
     }
+    llm_backend_host_write(x);
 }

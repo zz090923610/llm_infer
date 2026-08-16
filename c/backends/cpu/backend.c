@@ -46,7 +46,20 @@ void llm_backend_intern_weight_q8(const void *host_key, const void *q8_blob, int
     (void)n_elements;
 }
 
+void llm_backend_intern_weight_quant(const void *host_key, const void *blob, int n_elements,
+                                     int ggml_type) {
+    (void)host_key;
+    (void)blob;
+    (void)n_elements;
+    (void)ggml_type;
+}
+
 int llm_backend_q8_linear(void) {
+    return 0;
+}
+
+int llm_backend_quant_linear(int ggml_type) {
+    (void)ggml_type;
     return 0;
 }
 

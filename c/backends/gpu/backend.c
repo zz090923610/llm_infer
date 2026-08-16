@@ -1,10 +1,12 @@
 #include "backend.h"
+#include "gguf.h"
 #include "vk.h"
 
 const char *llm_backend_name(void) {
     return gpu_device_name();
 }
 
+#ifndef LLM_HAS_POOL
 void llm_backend_set_threads(int n) {
     (void)n;
 }
@@ -28,6 +30,7 @@ int llm_backend_n_prefill_threads(void) {
 int llm_backend_n_decode_threads(void) {
     return 1;
 }
+#endif
 
 void llm_backend_sync(void) {
     gpu_sync();
@@ -50,8 +53,24 @@ void llm_backend_intern_weight_q8(const void *host_key, const void *q8_blob, int
     gpu_intern_q8(host_key, q8_blob, n_elements);
 }
 
+void llm_backend_intern_weight_quant(const void *host_key, const void *blob, int n_elements,
+                                     int ggml_type) {
+    /* Packed Q8_0 has a fused shader, but mixing it with CPU kernels in the
+       full generate graph still desyncs activations. Keep Q8_0 on the host
+       qlinear path (same as Q4_K / Q6_K / IQ4_XS) until that is fixed. */
+    (void)host_key;
+    (void)blob;
+    (void)n_elements;
+    (void)ggml_type;
+}
+
 int llm_backend_q8_linear(void) {
-    return 1;
+    return 0;
+}
+
+int llm_backend_quant_linear(int ggml_type) {
+    (void)ggml_type;
+    return 0;
 }
 
 void llm_backend_host_write(void *p) {

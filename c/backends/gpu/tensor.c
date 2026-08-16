@@ -37,6 +37,9 @@ static void linear_rows_ex(const float *W, const float *x, float *y, int n_tok, 
     bW = gpu_intern(W, wbytes, wkind);
     GpuBuf *bX = gpu_find_containing(x, xbytes, &xoff);
     if (!bX) {
+        /* Unaligned slice of an interned activation: download the parent first
+           so the new intern does not upload a stale host copy. */
+        gpu_host_read(x);
         bX = gpu_intern(x, xbytes, GPU_BUF_RW);
         xoff = 0;
     }
@@ -69,6 +72,20 @@ void rmsnorm(const float *x, const float *weight, float *y, int n, float eps) {
 
 void rmsnorm_rows(const float *x, const float *weight, float *y, int n_tok, int n, float eps) {
     if (n_tok <= 0 || n <= 0) return;
+    if (x == y) {
+        gpu_host_read(x);
+        for (int t = 0; t < n_tok; t++) {
+            const float *xr = x + (size_t)t * (size_t)n;
+            float *yr = y + (size_t)t * (size_t)n;
+            float ms = 0.0f;
+            for (int i = 0; i < n; i++) ms += xr[i] * xr[i];
+            ms /= (float)n;
+            float inv = 1.0f / sqrtf(ms + eps);
+            for (int i = 0; i < n; i++) yr[i] = xr[i] * inv * weight[i];
+        }
+        gpu_host_write(y);
+        return;
+    }
     GpuPC pc = zpc();
     pc.i[0] = n;
     pc.i[1] = n_tok;
@@ -94,6 +111,16 @@ void silu(const float *x, float *y, int n) {
 
 void silu_mul(const float *x, const float *g, float *y, int n) {
     if (n <= 0) return;
+    if (x == y || g == y) {
+        gpu_host_read(x);
+        gpu_host_read(g);
+        for (int i = 0; i < n; i++) {
+            float xv = x[i];
+            y[i] = (xv / (1.0f + expf(-xv))) * g[i];
+        }
+        gpu_host_write(y);
+        return;
+    }
     GpuPC pc = zpc();
     pc.i[0] = n;
     GpuBuf *bX = gpu_intern(x, (size_t)n * sizeof(float), GPU_BUF_RW);
@@ -126,6 +153,17 @@ void softmax_rows(float *x, int n_rows, int n) {
 
 void vec_add(const float *a, const float *b, float *y, int n) {
     if (n <= 0) return;
+    if (a == y || b == y) {
+        gpu_host_read(a);
+        gpu_host_read(b);
+        if (a == y) {
+            for (int i = 0; i < n; i++) y[i] += b[i];
+        } else {
+            for (int i = 0; i < n; i++) y[i] += a[i];
+        }
+        gpu_host_write(y);
+        return;
+    }
     GpuPC pc = zpc();
     pc.i[0] = n;
     GpuBuf *bA = gpu_intern(a, (size_t)n * sizeof(float), GPU_BUF_RW);
@@ -177,28 +215,14 @@ int argmax_f64(const double *x, int n) {
 
 int argmax_f32(const float *x, int n) {
     if (n <= 0) return 0;
-    size_t xoff = 0;
-    GpuBuf *bx = gpu_find(x);
-    if (!bx) bx = gpu_find_containing(x, (size_t)n * sizeof(float), &xoff);
-    if (!bx) {
-        int best = 0;
-        float m = x[0];
-        for (int i = 1; i < n; i++) {
-            if (x[i] > m) {
-                m = x[i];
-                best = i;
-            }
+    gpu_host_read(x);
+    int best = 0;
+    float m = x[0];
+    for (int i = 1; i < n; i++) {
+        if (x[i] > m) {
+            m = x[i];
+            best = i;
         }
-        return best;
     }
-    static int s_idx;
-    GpuBuf *bo = gpu_intern(&s_idx, sizeof(s_idx), GPU_BUF_RW);
-    GpuPC pc = zpc();
-    pc.i[0] = n;
-    GpuBuf *bs[] = {bx, bo};
-    size_t offs[] = {xoff, 0};
-    gpu_dispatch_offs(GPU_PIPE_ARGMAX, bs, offs, 2, &pc, 1, 1, 1);
-    gpu_wrote(bo);
-    gpu_commit(bo);
-    return s_idx;
+    return best;
 }

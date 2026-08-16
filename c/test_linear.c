@@ -234,8 +234,106 @@ static void test_embed_q8(void) {
     float out[3 * 32], ref[3 * 32];
     embed_gather_wt(&W, ids, out, 3, d);
     llm_backend_sync();
+    llm_backend_intern_weight(table, (size_t)n_vocab * (size_t)d * sizeof(float));
     embed_gather(table, ids, ref, 3, d);
+    llm_backend_sync();
     check_close(out, ref, 3 * d, d, "embed_gather_wt q8");
+}
+
+static void fill_q4k_block(unsigned char *blk) {
+    memset(blk, 0, BLOCK_Q4_K);
+    uint16_t d = 0x3c00, dmin = 0x3800; /* 1.0, 0.5 */
+    memcpy(blk, &d, 2);
+    memcpy(blk + 2, &dmin, 2);
+    blk[4] = blk[5] = blk[6] = blk[7] = 1;
+    memset(blk + 16, 0x22, 128);
+}
+
+static void fill_q6k_block(unsigned char *blk) {
+    memset(blk, 0, BLOCK_Q6_K);
+    memset(blk + 128 + 64, 1, 16);
+    uint16_t d = 0x3c00;
+    memcpy(blk + 128 + 64 + 16, &d, 2);
+}
+
+static void fill_iq4_block(unsigned char *blk) {
+    memset(blk, 0, BLOCK_IQ4_XS);
+    uint16_t d = 0x3c00;
+    memcpy(blk, &d, 2);
+}
+
+static void test_linear_kquant(int ggml_type, int n_tok, int n_out) {
+    int n_in = QK_K;
+    int n = n_out * n_in;
+    int blksz = ggml_type_size(ggml_type);
+    unsigned char *pack = malloc((size_t)(n / QK_K) * (size_t)blksz);
+    float *Wf = malloc((size_t)n * sizeof(float));
+    float *x = malloc((size_t)n_tok * (size_t)n_in * sizeof(float));
+    float *y = malloc((size_t)n_tok * (size_t)n_out * sizeof(float));
+    float *ref = malloc((size_t)n_tok * (size_t)n_out * sizeof(float));
+    expect_eq(pack && Wf && x && y && ref, "alloc linear kquant");
+    if (!pack || !Wf || !x || !y || !ref) {
+        free(pack);
+        free(Wf);
+        free(x);
+        free(y);
+        free(ref);
+        return;
+    }
+    int nb = n / QK_K;
+    for (int b = 0; b < nb; b++) {
+        unsigned char *blk = pack + (size_t)b * (size_t)blksz;
+        if (ggml_type == GGML_Q4_K) fill_q4k_block(blk);
+        else if (ggml_type == GGML_Q6_K) fill_q6k_block(blk);
+        else fill_iq4_block(blk);
+    }
+    expect_eq(dequantize_row(ggml_type, pack, n, Wf) == 0, "kquant dequant");
+    fill_rand(x, n_tok * n_in);
+    WeightTensor W;
+    memset(&W, 0, sizeof(W));
+    W.name = "kW";
+    W.data = pack;
+    W.ggml_type = ggml_type;
+    W.n_elements = n;
+    W.ndim = 2;
+    W.shape[0] = n_out;
+    W.shape[1] = n_in;
+    llm_backend_intern_weight_quant(&W, pack, n, ggml_type);
+    linear_rows_wt(&W, x, y, n_tok, n_out, n_in);
+    llm_backend_sync();
+    for (int t = 0; t < n_tok; t++) {
+        linear_ref(Wf, x + (size_t)t * (size_t)n_in, ref + (size_t)t * (size_t)n_out, n_out, n_in);
+    }
+    char tag[80];
+    snprintf(tag, sizeof(tag), "linear_wt type=%d n_tok=%d n_out=%d", ggml_type, n_tok, n_out);
+    check_close(y, ref, n_tok * n_out, n_in, tag);
+    free(pack);
+    free(Wf);
+    free(x);
+    free(y);
+    free(ref);
+}
+
+static void test_embed_kquant(void) {
+    const int n_vocab = 4, d = QK_K;
+    unsigned char pack[4 * BLOCK_Q4_K];
+    float table[4 * QK_K];
+    for (int r = 0; r < n_vocab; r++) fill_q4k_block(pack + (size_t)r * BLOCK_Q4_K);
+    expect_eq(dequantize_q4_k(pack, n_vocab * d, table) == 0, "embed q4_k dequant");
+    WeightTensor W;
+    memset(&W, 0, sizeof(W));
+    W.name = "emb4";
+    W.data = pack;
+    W.ggml_type = GGML_Q4_K;
+    W.n_elements = n_vocab * d;
+    int ids[3] = {0, 2, 3};
+    float out[3 * QK_K], ref[3 * QK_K];
+    embed_gather_wt(&W, ids, out, 3, d);
+    llm_backend_sync();
+    llm_backend_intern_weight(table, (size_t)n_vocab * (size_t)d * sizeof(float));
+    embed_gather(table, ids, ref, 3, d);
+    llm_backend_sync();
+    check_close(out, ref, 3 * d, d, "embed_gather_wt q4_k");
 }
 
 static void test_linear_f16_texel(int n_out, int n_in) {
@@ -490,6 +588,38 @@ static void test_attn_gqa(void) {
     free(areff);
 }
 
+static void test_host_read_preserves_cpu_write(void) {
+    const int n = 64;
+    float *a = malloc((size_t)n * sizeof(float));
+    float *b = malloc((size_t)n * sizeof(float));
+    float *y = malloc((size_t)n * sizeof(float));
+    expect_eq(a && b && y, "alloc host_rw");
+    if (!a || !b || !y) return;
+    fill_rand(a, n);
+    fill_rand(b, n);
+    vec_add(a, b, y, n);
+    llm_backend_sync();
+    for (int i = 0; i < n; i++) y[i] = (float)i;
+    llm_backend_host_write(y);
+    llm_backend_host_read(y);
+    for (int i = 0; i < n; i++) {
+        if (y[i] != (float)i) {
+            fprintf(stderr, "FAIL: host_read clobbered CPU write y[%d]=%g\n", i, y[i]);
+            fails++;
+            break;
+        }
+    }
+    vec_add(a, b, y, n);
+    llm_backend_host_read(y);
+    float *ref = malloc((size_t)n * sizeof(float));
+    for (int i = 0; i < n; i++) ref[i] = a[i] + b[i];
+    check_close_abs(y, ref, n, 1e-5f, "host_read after gpu write");
+    free(a);
+    free(b);
+    free(y);
+    free(ref);
+}
+
 int main(void) {
     llm_backend_set_threads(4);
     const int n_ins[] = {960, 2560, 7, 64};
@@ -508,12 +638,20 @@ int main(void) {
     test_linear_q8(1, 16, 64);
     test_linear_q8(1, 16, 960);
     test_linear_q8(4, 16, 64);
+    test_linear_q8(1, 960, 960);
+    test_linear_q8(5, 960, 960);
     test_embed_q8();
+    test_linear_kquant(GGML_Q4_K, 1, 8);
+    test_linear_kquant(GGML_Q4_K, 4, 8);
+    test_linear_kquant(GGML_Q6_K, 1, 4);
+    test_linear_kquant(GGML_IQ4_XS, 1, 4);
+    test_embed_kquant();
     test_linear_f16_texel(960, 960);
     test_linear_f16_texel(16, 960);
     test_apply_rope();
     test_apply_rope_neox();
     test_attn_gqa();
+    test_host_read_preserves_cpu_write();
     if (fails) {
         fprintf(stderr, "%d failure(s)\n", fails);
         return 1;

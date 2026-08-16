@@ -1,12 +1,44 @@
 #include "gdn.h"
 #include "tensor.h"
 #include "weight.h"
+#include "backend.h"
 #include "util.h"
 #include <math.h>
 #include <string.h>
 
 #if defined(__AVX2__) && defined(__FMA__)
 #include "simd.h"
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+static float neon_dot(const float *a, const float *b, int n) {
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        acc = vfmaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
+        acc = vfmaq_f32(acc, vld1q_f32(a + i + 4), vld1q_f32(b + i + 4));
+    }
+    float s = vaddvq_f32(acc);
+    for (; i < n; i++) s += a[i] * b[i];
+    return s;
+}
+static void neon_scale(float *x, float s, int n) {
+    float32x4_t vs = vdupq_n_f32(s);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        vst1q_f32(x + i, vmulq_f32(vld1q_f32(x + i), vs));
+        vst1q_f32(x + i + 4, vmulq_f32(vld1q_f32(x + i + 4), vs));
+    }
+    for (; i < n; i++) x[i] *= s;
+}
+static void neon_axpy(float *y, float a, const float *x, int n) {
+    float32x4_t va = vdupq_n_f32(a);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        vst1q_f32(y + i, vfmaq_f32(vld1q_f32(y + i), va, vld1q_f32(x + i)));
+        vst1q_f32(y + i + 4, vfmaq_f32(vld1q_f32(y + i + 4), va, vld1q_f32(x + i + 4)));
+    }
+    for (; i < n; i++) y[i] += a * x[i];
+}
 #endif
 
 int layer_is_gdn(const LlamaHParams *hp, int il) {
@@ -28,6 +60,9 @@ static void l2norm(float *x, int n, float eps) {
     float ss = llm_dot_f32(x, x, n);
     float inv = 1.0f / sqrtf(ss + eps);
     llm_scale_f32(x, inv, n);
+#elif defined(__aarch64__)
+    float ss = neon_dot(x, x, n);
+    neon_scale(x, 1.0f / sqrtf(ss + eps), n);
 #else
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += x[i] * x[i];
@@ -50,6 +85,18 @@ static void gdn_delta_rule(float *S, const float *qv, const float *kv, const flo
     }
     for (int j = 0; j < d_state; j++) {
         ov[j] = llm_dot_f32(S + (size_t)j * (size_t)d_state, qv, d_state) * scale;
+    }
+#elif defined(__aarch64__)
+    neon_scale(S, gv, ss);
+    for (int j = 0; j < d_state; j++) {
+        float sum = neon_dot(S + (size_t)j * (size_t)d_state, kv, d_state);
+        delta[j] = (vv[j] - sum) * beta;
+    }
+    for (int j = 0; j < d_state; j++) {
+        neon_axpy(S + (size_t)j * (size_t)d_state, delta[j], kv, d_state);
+    }
+    for (int j = 0; j < d_state; j++) {
+        ov[j] = neon_dot(S + (size_t)j * (size_t)d_state, qv, d_state) * scale;
     }
 #else
     for (int i = 0; i < ss; i++) S[i] *= gv;
@@ -78,6 +125,17 @@ static void silu_mul_inplace(float *ov, const float *zv, int n) {
         float silu = zv[i] / (1.0f + expf(-zv[i]));
         ov[i] *= silu;
     }
+}
+
+/* Host RMSNorm. GDN scratch must not go through the GPU rmsnorm kernel: that
+ * interns per-head slices and never copies the result back, so the CPU delta
+ * rule / SiLU path would keep reading zeros. */
+static void rmsnorm_host(float *x, const float *weight, int n, float eps) {
+    float ms = 0.0f;
+    for (int i = 0; i < n; i++) ms += x[i] * x[i];
+    ms /= (float)n;
+    float inv = 1.0f / sqrtf(ms + eps);
+    for (int i = 0; i < n; i++) x[i] *= inv * weight[i];
 }
 
 void gdn_layer_forward(const LayerWeights *L, const LlamaHParams *hp, const float *x, float *y,
@@ -109,6 +167,7 @@ void gdn_layer_forward(const LayerWeights *L, const LlamaHParams *hp, const floa
     float *k_raw = q_raw + key_dim;
 
     memset(y, 0, (size_t)B * (size_t)S * (size_t)D * sizeof(float));
+    llm_backend_host_read(x);
 
     for (int b = 0; b < B; b++) {
         int n = valid_len ? valid_len[b] : S;
@@ -117,9 +176,13 @@ void gdn_layer_forward(const LayerWeights *L, const LlamaHParams *hp, const floa
         for (int t = 0; t < n; t++) {
             const float *xt = x + (size_t)(b * S + t) * (size_t)D;
             linear_wt(L->wqkv, xt, qkv, conv_dim, D);
+            llm_backend_host_read(qkv);
             linear_wt(L->attn_gate, xt, z, value_dim, D);
+            llm_backend_host_read(z);
             linear_wt(L->ssm_beta, xt, beta, n_v_heads, D);
+            llm_backend_host_read(beta);
             linear_wt(L->ssm_alpha, xt, g, n_v_heads, D);
+            llm_backend_host_read(g);
             for (int i = 0; i < n_v_heads; i++) {
                 beta[i] = sigmoid_f(beta[i]);
                 g[i] = softplus_f(g[i] + L->ssm_dt[i]) * L->ssm_a[i];
@@ -160,10 +223,11 @@ void gdn_layer_forward(const LayerWeights *L, const LlamaHParams *hp, const floa
                 const float *vv = v + vh * d_state;
                 float *ov = out + vh * d_state;
                 gdn_delta_rule(S, qv, kv, vv, ov, delta, expf(g[vh]), beta[vh], scale, d_state);
-                rmsnorm(ov, L->ssm_norm, ov, d_state, eps);
+                rmsnorm_host(ov, L->ssm_norm, d_state, eps);
                 silu_mul_inplace(ov, z + vh * d_state, d_state);
             }
             linear_wt(L->ssm_out, out, y + (size_t)(b * S + t) * (size_t)D, D, value_dim);
         }
     }
+    llm_backend_host_write(y);
 }

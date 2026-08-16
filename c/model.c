@@ -36,8 +36,8 @@ static void intern_mat(const WeightTensor *w) {
     if (!w) return;
     if (w->ggml_type == GGML_F32)
         llm_backend_intern_weight_f16(w->data, (size_t)w->n_elements * sizeof(float));
-    else if (w->ggml_type == GGML_Q8_0)
-        llm_backend_intern_weight_q8(w, w->data, w->n_elements);
+    else
+        llm_backend_intern_weight_quant(w, w->data, w->n_elements, w->ggml_type);
 }
 
 static void add_bias_rows(float *y, const float *bias, int n_tok, int n) {
@@ -49,6 +49,7 @@ static void add_bias_rows(float *y, const float *bias, int n_tok, int n) {
 }
 
 static void split_q_gate(const float *src, float *q, float *gate, int B, int S, int H, int d) {
+    llm_backend_host_read(src);
     for (int b = 0; b < B; b++) {
         for (int s = 0; s < S; s++) {
             const float *row = src + (size_t)(b * S + s) * (size_t)H * 2 * (size_t)d;
@@ -60,10 +61,15 @@ static void split_q_gate(const float *src, float *q, float *gate, int B, int S, 
             }
         }
     }
+    llm_backend_host_write(q);
+    llm_backend_host_write(gate);
 }
 
 static void sigmoid_mul(float *y, const float *gate, int n) {
+    llm_backend_host_read(y);
+    llm_backend_host_read(gate);
     for (int i = 0; i < n; i++) y[i] *= 1.0f / (1.0f + expf(-gate[i]));
+    llm_backend_host_write(y);
 }
 
 static size_t gdn_scratch_floats(const LlamaHParams *hp) {
@@ -375,17 +381,23 @@ static void full_attn_layer(LlamaModel *m, LayerWeights *L, int B, int S, int D,
         apply_rope_any(m, m->ffn_gate, B, KV, S, d);
         attn_cache_store(layer_k, layer_v, m->ffn_gate, m->ffn_up, batch_stride, head_stride,
                          m->valid_buf, m->starts, B, S, KV, d);
-        attn_gqa(m->y, m->attn, q_bs, layer_k, layer_v, batch_stride, head_stride, m->positions,
+        /* Decode (S==1) keeps Q in y. Attn must not overwrite Q in place — the
+           GPU shader re-reads Q for every key, and CPU kernels zero the output
+           first. Use q when Q lives in y. */
+        float *attn_out = (q_bs == m->y) ? m->q : m->y;
+        attn_gqa(attn_out, m->attn, q_bs, layer_k, layer_v, batch_stride, head_stride, m->positions,
                  m->valid_buf, m->key_len, B, H, S, KV, d, max_k, scale);
-        if (gated) sigmoid_mul(m->y, g_bs, B * H * d);
-        linear_rows_add_wt(L->wo, m->y, m->x, BS, D, L->wo_in);
+        if (gated) sigmoid_mul(attn_out, g_bs, B * H * d);
+        linear_rows_add_wt(L->wo, attn_out, m->x, BS, D, L->wo_in);
         return;
     }
 
     attn_pack_heads(q_bs, m->q, B, S, H, d);
     if (gated) {
         attn_pack_heads(g_bs, m->y, B, S, H, d);
+        llm_backend_host_read(m->y);
         memcpy(m->gate_buf, m->y, (size_t)B * (size_t)H * (size_t)S * (size_t)d * sizeof(float));
+        llm_backend_host_write(m->gate_buf);
     }
     attn_pack_heads(m->ffn_gate, m->k, B, S, KV, d);
     attn_pack_heads(m->ffn_up, m->v, B, S, KV, d);
@@ -489,6 +501,7 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
         linear_rows_wt(m->output, hlast, logits + (size_t)b * (size_t)hp->n_vocab, 1, hp->n_vocab, D);
         cache->n_seq[b] = m->key_len[b];
     }
+    llm_backend_host_read(logits);
     free(vl_local);
     return logits;
 }

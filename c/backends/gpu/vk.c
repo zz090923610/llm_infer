@@ -566,6 +566,9 @@ void gpu_upload(GpuBuf *b) {
     if ((b->kind == GPU_BUF_WEIGHT || b->kind == GPU_BUF_WEIGHT_F16) && b->uploaded && b->fp == fp)
         return;
     if (b->kind == GPU_BUF_DEVICE && b->uploaded) return;
+    /* GPU owns dirty RW buffers. Do not memcpy a stale host copy over them
+       even if the first-128-byte fingerprint moved (CPU memset, etc.). */
+    if (b->kind == GPU_BUF_RW && b->gpu_dirty) return;
     if (b->kind == GPU_BUF_RW && !b->need_upload && b->fp == fp) return;
     if (b->kind == GPU_BUF_WEIGHT_F16) {
         const float *src = (const float *)b->host;
@@ -619,7 +622,9 @@ void gpu_wrote(GpuBuf *b) {
 void gpu_commit(GpuBuf *b) {
     submit_wait(0);
     if (!b) return;
-    if (b->mapped && b->host) {
+    /* Only GPU→host when the GPU last wrote. A CPU kernel may have host_write()'d
+       newer data; copying mapped memory would clobber it. */
+    if (b->gpu_dirty && b->mapped && b->host) {
         invalidate_mapped(b);
         memcpy((void *)b->host, b->mapped, b->live ? b->live : b->bytes);
     }
@@ -627,14 +632,30 @@ void gpu_commit(GpuBuf *b) {
     if (b->kind == GPU_BUF_RW) b->need_upload = 1;
 }
 
-void gpu_host_read(const void *p) {
+/* CPU kernels often pass a slice (last token, GDN timestep). Match the parent RW
+   buffer, not only the interned base pointer. */
+static GpuBuf *gpu_find_rw(const void *p) {
+    if (!p) return NULL;
     GpuBuf *b = gpu_find(p);
-    if (b && b->kind != GPU_BUF_WEIGHT && b->kind != GPU_BUF_WEIGHT_F16 &&
-        b->kind != GPU_BUF_WEIGHT_Q8) gpu_commit(b);
+    if (b) return b->kind == GPU_BUF_RW ? b : NULL;
+    const char *cp = (const char *)p;
+    for (int i = 0; i < g_nbufs; i++) {
+        b = &g_bufs[i];
+        if (!b->host || b->kind != GPU_BUF_RW) continue;
+        const char *h = (const char *)b->host;
+        if (cp >= h && cp < h + b->bytes) return b;
+    }
+    return NULL;
+}
+
+void gpu_host_read(const void *p) {
+    GpuBuf *b = gpu_find_rw(p);
+    if (!b || !b->gpu_dirty) return;
+    gpu_commit(b);
 }
 
 void gpu_host_write(void *p) {
-    GpuBuf *b = gpu_find(p);
+    GpuBuf *b = gpu_find_rw(p);
     if (!b) return;
     b->need_upload = 1;
     b->gpu_dirty = 0;
