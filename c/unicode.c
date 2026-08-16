@@ -16,6 +16,7 @@ int unicode_cat(uint32_t cp) {
 int is_letter(uint32_t cp) { return unicode_cat(cp) == UCAT_LETTER; }
 int is_number(uint32_t cp) { return unicode_cat(cp) == UCAT_NUMBER; }
 int is_space(uint32_t cp) { return unicode_cat(cp) == UCAT_SPACE; }
+int is_mark(uint32_t cp) { return unicode_cat(cp) == UCAT_MARK; }
 
 int utf8_decode(const char *s, size_t len, size_t i, uint32_t *cp) {
     if (i >= len) return 0;

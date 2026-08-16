@@ -9,6 +9,17 @@
 #define GGUF_DEFAULT_ALIGNMENT 32
 #define GGML_F32 0
 #define GGML_Q8_0 8
+#define GGML_Q4_K 12
+#define GGML_Q6_K 14
+#define GGML_IQ4_XS 23
+
+enum {
+    LLM_ARCH_LLAMA = 0,
+    LLM_ARCH_QWEN2,
+    LLM_ARCH_QWEN35
+};
+
+#define LLM_DEFAULT_MAX_SEQ 4096
 
 enum {
     GGUF_U8 = 0,
@@ -66,7 +77,10 @@ typedef struct {
 } GGUFFile;
 
 typedef struct {
+    int arch;
     int n_layer;
+    int n_layer_fwd;
+    int n_layer_nextn;
     int n_embd;
     int n_ff;
     int n_head;
@@ -77,6 +91,15 @@ typedef struct {
     int n_ctx;
     float rms_eps;
     float rope_theta;
+    int rope_neox;
+    int rope_sections[4];
+    int full_attention_interval;
+    int enable_thinking;
+    int ssm_d_conv;
+    int ssm_d_inner;
+    int ssm_d_state;
+    int ssm_dt_rank;
+    int ssm_n_group;
     int bos_id;
     int eos_id;
     int unk_id;
@@ -84,6 +107,7 @@ typedef struct {
     int add_space_prefix;
     char *chat_template;
     char *tokenizer_pre;
+    char *model_name;
 } LlamaHParams;
 
 typedef struct {

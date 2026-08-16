@@ -42,6 +42,8 @@ set(LLM_SOURCES
     unicode_data.c
     tokenizer.c
     cache.c
+    gdn.c
+    rope_neox.c
     model.c
     sampler.c
     generate.c
@@ -58,6 +60,9 @@ endif()
 if(LLM_BACKEND STREQUAL "x86_64" OR LLM_BACKEND STREQUAL "aarch64")
   find_package(Threads REQUIRED)
   target_link_libraries(llm PUBLIC Threads::Threads)
+endif()
+if(LLM_BACKEND STREQUAL "x86_64")
+  target_include_directories(llm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/x86_64)
 endif()
 if(LLM_BACKEND STREQUAL "gpu")
   target_link_libraries(llm PUBLIC ${LLM_BACKEND_LIBS})

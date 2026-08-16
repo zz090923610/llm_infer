@@ -8,6 +8,7 @@
 #define UCAT_LETTER 1
 #define UCAT_NUMBER 2
 #define UCAT_SPACE 3
+#define UCAT_MARK 4
 
 typedef struct {
     uint32_t lo;
@@ -22,6 +23,7 @@ int unicode_cat(uint32_t cp);
 int is_letter(uint32_t cp);
 int is_number(uint32_t cp);
 int is_space(uint32_t cp);
+int is_mark(uint32_t cp);
 
 /* Decode one UTF-8 codepoint. Returns bytes consumed, or 0 on error. */
 int utf8_decode(const char *s, size_t len, size_t i, uint32_t *cp);

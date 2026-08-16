@@ -48,3 +48,109 @@ int dequantize_f32(const void *data, int n_elements, float *out) {
     memcpy(out, data, (size_t)n_elements * sizeof(float));
     return 0;
 }
+
+static void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (uint8_t)((q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4));
+        *m = (uint8_t)((q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4));
+    }
+}
+
+int dequantize_q4_k(const void *data, int n_elements, float *out) {
+    if (n_elements % QK_K != 0) return -1;
+    int nb = n_elements / QK_K;
+    const unsigned char *raw = (const unsigned char *)data;
+    float *y = out;
+    for (int i = 0; i < nb; i++) {
+        const unsigned char *blk = raw + (size_t)i * BLOCK_Q4_K;
+        uint16_t hd, hm;
+        memcpy(&hd, blk, 2);
+        memcpy(&hm, blk + 2, 2);
+        const float d = fp16_to_fp32(hd);
+        const float minv = fp16_to_fp32(hm);
+        const uint8_t *scales = blk + 4;
+        const uint8_t *q = blk + 4 + K_SCALE_SIZE;
+        int is = 0;
+        for (int j = 0; j < QK_K; j += 64) {
+            uint8_t sc, m;
+            get_scale_min_k4(is + 0, scales, &sc, &m);
+            const float d1 = d * (float)sc;
+            const float m1 = minv * (float)m;
+            get_scale_min_k4(is + 1, scales, &sc, &m);
+            const float d2 = d * (float)sc;
+            const float m2 = minv * (float)m;
+            for (int l = 0; l < 32; ++l) *y++ = d1 * (float)(q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; ++l) *y++ = d2 * (float)(q[l] >> 4) - m2;
+            q += 32;
+            is += 2;
+        }
+    }
+    return 0;
+}
+
+int dequantize_q6_k(const void *data, int n_elements, float *out) {
+    if (n_elements % QK_K != 0) return -1;
+    int nb = n_elements / QK_K;
+    const unsigned char *raw = (const unsigned char *)data;
+    float *y = out;
+    for (int i = 0; i < nb; i++) {
+        const unsigned char *blk = raw + (size_t)i * BLOCK_Q6_K;
+        const uint8_t *ql = blk;
+        const uint8_t *qh = blk + QK_K / 2;
+        const int8_t *sc = (const int8_t *)(blk + QK_K / 2 + QK_K / 4);
+        uint16_t hd;
+        memcpy(&hd, blk + QK_K / 2 + QK_K / 4 + QK_K / 16, 2);
+        const float d = fp16_to_fp32(hd);
+        for (int n = 0; n < QK_K; n += 128) {
+            for (int l = 0; l < 32; ++l) {
+                int is = l / 16;
+                const int8_t q1 = (int8_t)((ql[l + 0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                const int8_t q2 = (int8_t)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                const int8_t q3 = (int8_t)((ql[l + 0] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                const int8_t q4 = (int8_t)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                y[l + 0] = d * (float)sc[is + 0] * (float)q1;
+                y[l + 32] = d * (float)sc[is + 2] * (float)q2;
+                y[l + 64] = d * (float)sc[is + 4] * (float)q3;
+                y[l + 96] = d * (float)sc[is + 6] * (float)q4;
+            }
+            y += 128;
+            ql += 64;
+            qh += 32;
+            sc += 8;
+        }
+    }
+    return 0;
+}
+
+static const int8_t kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+int dequantize_iq4_xs(const void *data, int n_elements, float *out) {
+    if (n_elements % QK_K != 0) return -1;
+    int nb = n_elements / QK_K;
+    const unsigned char *raw = (const unsigned char *)data;
+    float *y = out;
+    for (int i = 0; i < nb; i++) {
+        const unsigned char *blk = raw + (size_t)i * BLOCK_IQ4_XS;
+        uint16_t hd, scales_h;
+        memcpy(&hd, blk, 2);
+        memcpy(&scales_h, blk + 2, 2);
+        const float d = fp16_to_fp32(hd);
+        const uint8_t *scales_l = blk + 4;
+        const uint8_t *qs = blk + 8;
+        for (int ib = 0; ib < QK_K / 32; ++ib) {
+            const int ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xf) | (((scales_h >> (2 * ib)) & 3) << 4);
+            const float dl = d * (float)(ls - 32);
+            for (int j = 0; j < 16; ++j) {
+                y[j + 0] = dl * (float)kvalues_iq4nl[qs[j] & 0xf];
+                y[j + 16] = dl * (float)kvalues_iq4nl[qs[j] >> 4];
+            }
+            y += 32;
+            qs += 16;
+        }
+    }
+    return 0;
+}

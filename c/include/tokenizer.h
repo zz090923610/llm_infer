@@ -26,10 +26,11 @@ typedef struct {
 typedef struct {
     Tokenizer *tok;
     int skip_special;
+    int in_think;
     ByteVec buf;
 } StreamDecoder;
 
-char *apply_chat_template(const ChatMessage *msgs, int n, int add_generation_prompt);
+char *apply_chat_template(const Tokenizer *tok, const ChatMessage *msgs, int n, int add_generation_prompt);
 
 Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp);
 Tokenizer *tokenizer_from_file(const char *path);

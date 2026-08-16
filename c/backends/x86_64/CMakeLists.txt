@@ -10,7 +10,7 @@ set(LLM_BACKEND_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/backend.c
     ${CMAKE_CURRENT_SOURCE_DIR}/pool.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tensor.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/rope.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/attn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/rope.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/attn.c
     PARENT_SCOPE
 )

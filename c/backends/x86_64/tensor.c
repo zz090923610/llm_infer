@@ -1,39 +1,75 @@
 #include "tensor.h"
 #include "pool.h"
 #include "backend.h"
+#include "simd.h"
 #include <immintrin.h>
 #include <math.h>
 #include <float.h>
 #include <string.h>
 
-static float hsum256(__m256 v) {
-    __m128 lo = _mm256_castps256_ps128(v);
-    __m128 hi = _mm256_extractf128_ps(v, 1);
-    __m128 s = _mm_add_ps(lo, hi);
-    __m128 sh = _mm_movehdup_ps(s);
-    s = _mm_add_ps(s, sh);
-    sh = _mm_movehl_ps(sh, s);
-    s = _mm_add_ss(s, sh);
-    return _mm_cvtss_f32(s);
+static float hsum256(__m256 v) { return llm_hsum256(v); }
+
+static float dot_range(const float *w, const float *x, int n_in) {
+    return llm_dot_f32(w, x, n_in);
 }
 
 static void linear_range(const float *W, const float *x, float *y, int n_out, int n_in, int i0,
                          int i1, int add) {
     (void)n_out;
-    for (int i = i0; i < i1; i++) {
-        const float *w = W + (size_t)i * (size_t)n_in;
+    int i = i0;
+    for (; i + 4 <= i1; i += 4) {
+        const float *w0 = W + (size_t)(i + 0) * (size_t)n_in;
+        const float *w1 = W + (size_t)(i + 1) * (size_t)n_in;
+        const float *w2 = W + (size_t)(i + 2) * (size_t)n_in;
+        const float *w3 = W + (size_t)(i + 3) * (size_t)n_in;
+        if (i + 4 < i1) {
+            _mm_prefetch((const char *)(W + (size_t)(i + 4) * (size_t)n_in), _MM_HINT_T0);
+        }
+        __m256 a00 = _mm256_setzero_ps(), a01 = _mm256_setzero_ps();
+        __m256 a10 = _mm256_setzero_ps(), a11 = _mm256_setzero_ps();
+        __m256 a20 = _mm256_setzero_ps(), a21 = _mm256_setzero_ps();
+        __m256 a30 = _mm256_setzero_ps(), a31 = _mm256_setzero_ps();
+        int j = 0;
+        for (; j + 16 <= n_in; j += 16) {
+            __m256 x0 = _mm256_loadu_ps(x + j);
+            __m256 x1 = _mm256_loadu_ps(x + j + 8);
+            a00 = _mm256_fmadd_ps(_mm256_loadu_ps(w0 + j), x0, a00);
+            a01 = _mm256_fmadd_ps(_mm256_loadu_ps(w0 + j + 8), x1, a01);
+            a10 = _mm256_fmadd_ps(_mm256_loadu_ps(w1 + j), x0, a10);
+            a11 = _mm256_fmadd_ps(_mm256_loadu_ps(w1 + j + 8), x1, a11);
+            a20 = _mm256_fmadd_ps(_mm256_loadu_ps(w2 + j), x0, a20);
+            a21 = _mm256_fmadd_ps(_mm256_loadu_ps(w2 + j + 8), x1, a21);
+            a30 = _mm256_fmadd_ps(_mm256_loadu_ps(w3 + j), x0, a30);
+            a31 = _mm256_fmadd_ps(_mm256_loadu_ps(w3 + j + 8), x1, a31);
+        }
+        for (; j + 8 <= n_in; j += 8) {
+            __m256 xv = _mm256_loadu_ps(x + j);
+            a00 = _mm256_fmadd_ps(_mm256_loadu_ps(w0 + j), xv, a00);
+            a10 = _mm256_fmadd_ps(_mm256_loadu_ps(w1 + j), xv, a10);
+            a20 = _mm256_fmadd_ps(_mm256_loadu_ps(w2 + j), xv, a20);
+            a30 = _mm256_fmadd_ps(_mm256_loadu_ps(w3 + j), xv, a30);
+        }
+        float s0 = hsum256(_mm256_add_ps(a00, a01));
+        float s1 = hsum256(_mm256_add_ps(a10, a11));
+        float s2 = hsum256(_mm256_add_ps(a20, a21));
+        float s3 = hsum256(_mm256_add_ps(a30, a31));
+        for (; j < n_in; j++) {
+            float xv = x[j];
+            s0 += w0[j] * xv;
+            s1 += w1[j] * xv;
+            s2 += w2[j] * xv;
+            s3 += w3[j] * xv;
+        }
+        y[i + 0] = add ? y[i + 0] + s0 : s0;
+        y[i + 1] = add ? y[i + 1] + s1 : s1;
+        y[i + 2] = add ? y[i + 2] + s2 : s2;
+        y[i + 3] = add ? y[i + 3] + s3 : s3;
+    }
+    for (; i < i1; i++) {
         if (i + 1 < i1) {
             _mm_prefetch((const char *)(W + (size_t)(i + 1) * (size_t)n_in), _MM_HINT_T0);
         }
-        __m256 acc = _mm256_setzero_ps();
-        int j = 0;
-        for (; j + 8 <= n_in; j += 8) {
-            __m256 vw = _mm256_loadu_ps(w + j);
-            __m256 vx = _mm256_loadu_ps(x + j);
-            acc = _mm256_fmadd_ps(vw, vx, acc);
-        }
-        float sum = hsum256(acc);
-        for (; j < n_in; j++) sum += w[j] * x[j];
+        float sum = dot_range(W + (size_t)i * (size_t)n_in, x, n_in);
         y[i] = add ? y[i] + sum : sum;
     }
 }

@@ -198,17 +198,203 @@ static void pretokenize_smollm(const char *text, char ***out, int *n_out) {
     *n_out = nw;
 }
 
-char *apply_chat_template(const ChatMessage *msgs, int n, int add_generation_prompt) {
+static uint32_t ascii_tolower(uint32_t cp) {
+    if (cp >= 'A' && cp <= 'Z') return cp - 'A' + 'a';
+    return cp;
+}
+
+static int is_letter_run(uint32_t cp, int with_marks) {
+    return is_letter(cp) || (with_marks && is_mark(cp));
+}
+
+/* Qwen2 / Qwen3.5 BPE pretok (llama.cpp unicode_regex_split_custom_qwen*). */
+static void pretokenize_qwen(const char *text, int with_marks, char ***out, int *n_out) {
+    int ncp = 0;
+    uint32_t *cps = utf8_codepoints(text, &ncp);
+    char **words = NULL;
+    int nw = 0, cap = 0;
+    const uint32_t OOR = 0xFFFFFFFFu;
+    int pos = 0;
+    while (pos < ncp) {
+        uint32_t cpt = cps[pos];
+        if (cpt == '\'' && pos + 1 < ncp) {
+            uint32_t nxt = ascii_tolower(cps[pos + 1]);
+            if (nxt == 's' || nxt == 't' || nxt == 'm' || nxt == 'd') {
+                if (nw >= cap) {
+                    cap = cap ? cap * 2 : 8;
+                    words = xrealloc(words, (size_t)cap * sizeof(char *));
+                }
+                words[nw++] = cps_slice_utf8(cps, pos, pos + 2);
+                pos += 2;
+                continue;
+            }
+            if (pos + 2 < ncp) {
+                uint32_t nn = ascii_tolower(cps[pos + 2]);
+                if ((nxt == 'r' && nn == 'e') || (nxt == 'v' && nn == 'e') || (nxt == 'l' && nn == 'l')) {
+                    if (nw >= cap) {
+                        cap = cap ? cap * 2 : 8;
+                        words = xrealloc(words, (size_t)cap * sizeof(char *));
+                    }
+                    words[nw++] = cps_slice_utf8(cps, pos, pos + 3);
+                    pos += 3;
+                    continue;
+                }
+            }
+        }
+        /* [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+  (qwen2: letters only in the run) */
+        if (!(cpt == '\r' || cpt == '\n' || is_number(cpt))) {
+            uint32_t nxt = (pos + 1 < ncp) ? cps[pos + 1] : OOR;
+            int nxt_run = (nxt != OOR) && is_letter_run(nxt, with_marks);
+            if (is_letter_run(cpt, with_marks) || nxt_run) {
+                int start = pos;
+                pos++;
+                while (pos < ncp && is_letter_run(cps[pos], with_marks)) pos++;
+                if (nw >= cap) {
+                    cap = cap ? cap * 2 : 8;
+                    words = xrealloc(words, (size_t)cap * sizeof(char *));
+                }
+                words[nw++] = cps_slice_utf8(cps, start, pos);
+                continue;
+            }
+        }
+        if (is_number(cpt)) {
+            if (nw >= cap) {
+                cap = cap ? cap * 2 : 8;
+                words = xrealloc(words, (size_t)cap * sizeof(char *));
+            }
+            words[nw++] = cps_slice_utf8(cps, pos, pos + 1);
+            pos++;
+            continue;
+        }
+        /* optional space + punctuation + newlines */
+        {
+            int look = (cpt == ' ' && pos + 1 < ncp) ? pos + 1 : pos;
+            uint32_t lookc = look < ncp ? cps[look] : 0;
+            int punct = look < ncp && lookc && !is_space(lookc) && !is_letter(lookc) && !is_number(lookc) &&
+                        !(with_marks && is_mark(lookc));
+            if (punct) {
+                int start = pos;
+                pos = look;
+                while (pos < ncp) {
+                    uint32_t c = cps[pos];
+                    if (is_space(c) || is_letter(c) || is_number(c) || (with_marks && is_mark(c))) break;
+                    pos++;
+                }
+                while (pos < ncp && (cps[pos] == '\r' || cps[pos] == '\n')) pos++;
+                if (nw >= cap) {
+                    cap = cap ? cap * 2 : 8;
+                    words = xrealloc(words, (size_t)cap * sizeof(char *));
+                }
+                words[nw++] = cps_slice_utf8(cps, start, pos);
+                continue;
+            }
+        }
+        int num_ws = 0;
+        int last_rn = 0;
+        while (pos + num_ws < ncp && is_space(cps[pos + num_ws])) {
+            uint32_t c = cps[pos + num_ws];
+            if (c == '\r' || c == '\n') last_rn = pos + num_ws + 1;
+            num_ws++;
+        }
+        if (last_rn > 0) {
+            if (nw >= cap) {
+                cap = cap ? cap * 2 : 8;
+                words = xrealloc(words, (size_t)cap * sizeof(char *));
+            }
+            words[nw++] = cps_slice_utf8(cps, pos, last_rn);
+            pos = last_rn;
+            continue;
+        }
+        if (num_ws > 1 && pos + num_ws < ncp) {
+            if (nw >= cap) {
+                cap = cap ? cap * 2 : 8;
+                words = xrealloc(words, (size_t)cap * sizeof(char *));
+            }
+            words[nw++] = cps_slice_utf8(cps, pos, pos + num_ws - 1);
+            pos += num_ws - 1;
+            continue;
+        }
+        if (num_ws > 0) {
+            if (nw >= cap) {
+                cap = cap ? cap * 2 : 8;
+                words = xrealloc(words, (size_t)cap * sizeof(char *));
+            }
+            words[nw++] = cps_slice_utf8(cps, pos, pos + num_ws);
+            pos += num_ws;
+            continue;
+        }
+        if (nw >= cap) {
+            cap = cap ? cap * 2 : 8;
+            words = xrealloc(words, (size_t)cap * sizeof(char *));
+        }
+        words[nw++] = cps_slice_utf8(cps, pos, pos + 1);
+        pos++;
+    }
+    free(cps);
+    *out = words;
+    *n_out = nw;
+}
+
+static int str_has_ci(const char *s, const char *needle) {
+    if (!s || !needle || !needle[0]) return 0;
+    for (; *s; s++) {
+        const char *a = s, *b = needle;
+        while (*a && *b) {
+            char ca = *a, cb = *b;
+            if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+            if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+            if (ca != cb) break;
+            a++;
+            b++;
+        }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+char *apply_chat_template(const Tokenizer *tok, const ChatMessage *msgs, int n, int add_generation_prompt) {
     ByteVec v;
     bytevec_init(&v);
+    int arch = tok ? tok->hparams.arch : LLM_ARCH_LLAMA;
+    int has_system = n > 0 && msgs[0].role && strcmp(msgs[0].role, "system") == 0;
+    if (!has_system) {
+        /* Qwen2.5 jinja injects this when no system message is given. Qwen3.5's
+           template does not; the extra "helpful assistant" clause is what 9B
+           was parroting. MiniCPM shares qwen35 and must not get a Qwen identity. */
+        const char *sys = NULL;
+        if (arch == LLM_ARCH_QWEN2) {
+            sys = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n";
+        } else if (arch == LLM_ARCH_QWEN35 && tok && str_has_ci(tok->hparams.model_name, "Qwen")) {
+            sys = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud.<|im_end|>\n";
+        }
+        if (sys) bytevec_append(&v, sys, (int)strlen(sys));
+    }
     for (int i = 0; i < n; i++) {
+        const char *content = msgs[i].content ? msgs[i].content : "";
+        while (*content == ' ' || *content == '\t' || *content == '\n' || *content == '\r') content++;
+        int clen = (int)strlen(content);
+        while (clen > 0 && (content[clen - 1] == ' ' || content[clen - 1] == '\t' ||
+                            content[clen - 1] == '\n' || content[clen - 1] == '\r'))
+            clen--;
         bytevec_append(&v, "<|im_start|>", 12);
         bytevec_append(&v, msgs[i].role, (int)strlen(msgs[i].role));
         bytevec_push(&v, '\n');
-        bytevec_append(&v, msgs[i].content, (int)strlen(msgs[i].content));
+        /* Match the non-thinking generation prefix on prior assistant turns so
+           the model does not see a format change mid-chat. */
+        if (arch == LLM_ARCH_QWEN35 && msgs[i].role && strcmp(msgs[i].role, "assistant") == 0 &&
+            !(tok && tok->hparams.enable_thinking)) {
+            bytevec_append(&v, "<think>\n\n</think>\n\n", 19);
+        }
+        if (clen > 0) bytevec_append(&v, content, clen);
         bytevec_append(&v, "<|im_end|>\n", 11);
     }
-    if (add_generation_prompt) bytevec_append(&v, "<|im_start|>assistant\n", 22);
+    if (add_generation_prompt) {
+        bytevec_append(&v, "<|im_start|>assistant\n", 22);
+        if (arch == LLM_ARCH_QWEN35) {
+            if (tok && tok->hparams.enable_thinking) bytevec_append(&v, "<think>\n", 8);
+            else bytevec_append(&v, "<think>\n\n</think>\n\n", 19);
+        }
+    }
     bytevec_push(&v, 0);
     return v.data;
 }
@@ -248,7 +434,11 @@ static int spec_cmp(const void *a, const void *b) {
     return sa->id - sb->id;
 }
 
+static int is_think_open(const char *tok) { return tok && strcmp(tok, "<think>") == 0; }
+static int is_think_close(const char *tok) { return tok && strcmp(tok, "</think>") == 0; }
+
 static int is_special_tok(const char *tok, int ttype) {
+    if (is_think_open(tok) || is_think_close(tok)) return 1;
     if (ttype == TYPE_UNKNOWN || ttype == TYPE_CONTROL || ttype == TYPE_USER_DEFINED) return 1;
     size_t n = strlen(tok);
     return n >= 4 && tok[0] == '<' && tok[1] == '|' && tok[n - 2] == '|' && tok[n - 1] == '>';
@@ -269,8 +459,9 @@ Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
     Tokenizer *t = xcalloc(1, sizeof(Tokenizer));
     if (hp) {
         t->hparams = *hp;
-        t->hparams.chat_template = NULL;
-        t->hparams.tokenizer_pre = NULL;
+        t->hparams.chat_template = hp->chat_template ? xstrdup(hp->chat_template) : NULL;
+        t->hparams.tokenizer_pre = hp->tokenizer_pre ? xstrdup(hp->tokenizer_pre) : NULL;
+        t->hparams.model_name = hp->model_name ? xstrdup(hp->model_name) : NULL;
     } else {
         hparams_from_kv(gguf, &t->hparams);
     }
@@ -312,8 +503,12 @@ Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
     intvec_init(&stops);
     intvec_push(&stops, t->hparams.eos_id);
     int tid;
-    if (hashmap_get(&t->token_to_id, "END", &tid)) intvec_push(&stops, tid);
-    if (hashmap_get(&t->token_to_id, "ĠEND", &tid)) intvec_push(&stops, tid);
+    /* SmolLM2 uses literal END as EOS. Do not treat those pieces as stops on
+       Qwen — they are ordinary BPE tokens and would truncate replies. */
+    if (t->hparams.arch == LLM_ARCH_LLAMA) {
+        if (hashmap_get(&t->token_to_id, "END", &tid)) intvec_push(&stops, tid);
+        if (hashmap_get(&t->token_to_id, "ĠEND", &tid)) intvec_push(&stops, tid);
+    }
     t->n_stop = stops.n;
     t->stop_ids = stops.data;
     return t;
@@ -554,7 +749,10 @@ static char *gpt2_byte_encode(const char *word) {
 static void encode_text(Tokenizer *t, const char *text, IntVec *ids) {
     char **words = NULL;
     int nw = 0;
-    pretokenize_smollm(text, &words, &nw);
+    const char *pre = t->hparams.tokenizer_pre ? t->hparams.tokenizer_pre : "";
+    if (strcmp(pre, "qwen2") == 0) pretokenize_qwen(text, 0, &words, &nw);
+    else if (strcmp(pre, "qwen35") == 0) pretokenize_qwen(text, 1, &words, &nw);
+    else pretokenize_smollm(text, &words, &nw);
     for (int i = 0; i < nw; i++) {
         char *enc = gpt2_byte_encode(words[i]);
         bpe(t, enc, ids);
@@ -602,8 +800,18 @@ static void decode_piece_bytes(Tokenizer *t, const char *piece, ByteVec *raw) {
 char *tokenizer_decode(Tokenizer *t, const int *ids, int n, int skip_special) {
     ByteVec raw;
     bytevec_init(&raw);
+    int hide = skip_special && t->hparams.arch == LLM_ARCH_QWEN35 && t->hparams.enable_thinking;
     for (int i = 0; i < n; i++) {
         const char *piece = t->vocab[ids[i]];
+        if (skip_special && is_think_open(piece)) {
+            hide = 1;
+            continue;
+        }
+        if (skip_special && is_think_close(piece)) {
+            hide = 0;
+            continue;
+        }
+        if (hide) continue;
         if (skip_special && hashmap_get(&t->special_set, piece, NULL)) continue;
         decode_piece_bytes(t, piece, &raw);
     }
@@ -653,6 +861,8 @@ static int utf8_valid_prefix(const char *s, int n) {
 void stream_decoder_init(StreamDecoder *d, Tokenizer *t, int skip_special) {
     d->tok = t;
     d->skip_special = skip_special;
+    /* Prompt already opened <think> when thinking is enabled. */
+    d->in_think = t && t->hparams.arch == LLM_ARCH_QWEN35 && t->hparams.enable_thinking;
     bytevec_init(&d->buf);
 }
 
@@ -660,6 +870,15 @@ void stream_decoder_free(StreamDecoder *d) { bytevec_free(&d->buf); }
 
 char *stream_decoder_push(StreamDecoder *d, int token_id) {
     const char *piece = d->tok->vocab[token_id];
+    if (is_think_open(piece)) {
+        d->in_think = 1;
+        return xstrdup("");
+    }
+    if (is_think_close(piece)) {
+        d->in_think = 0;
+        return xstrdup("");
+    }
+    if (d->in_think) return xstrdup("");
     if (d->skip_special && hashmap_get(&d->tok->special_set, piece, NULL)) return xstrdup("");
     decode_piece_bytes(d->tok, piece, &d->buf);
     if (utf8_valid_prefix(d->buf.data, d->buf.n) == 1) {

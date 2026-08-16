@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -278,9 +279,12 @@ static int kv_int(const GGUFFile *f, const char *key, int def, int required) {
     return (int)v->v.u;
 }
 
-static float kv_float(const GGUFFile *f, const char *key) {
+static float kv_float(const GGUFFile *f, const char *key, float def, int required) {
     const GGUFValue *v = gguf_get(f, key);
-    if (!v) die("missing GGUF key %s", key);
+    if (!v) {
+        if (required) die("missing GGUF key %s", key);
+        return def;
+    }
     if (v->type == GGUF_F32 || v->type == GGUF_F64) return (float)v->v.d;
     return (float)v->v.u;
 }
@@ -291,21 +295,98 @@ static const char *kv_str(const GGUFFile *f, const char *key, const char *def) {
     return v->v.s;
 }
 
+static void kv_key(char *buf, size_t n, const char *arch, const char *suffix) {
+    snprintf(buf, n, "%s.%s", arch, suffix);
+}
+
+static void read_rope_sections(const GGUFFile *f, const char *key, int *out) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    const GGUFValue *v = gguf_get(f, key);
+    if (!v || v->type != GGUF_ARR) return;
+    int n = v->v.arr.n < 4 ? v->v.arr.n : 4;
+    const unsigned char *p = (const unsigned char *)v->v.arr.data;
+    int t = v->v.arr.type;
+    for (int i = 0; i < n; i++) {
+        if (t == GGUF_I32 || t == GGUF_U32) {
+            int32_t x;
+            memcpy(&x, p + (size_t)i * 4, 4);
+            out[i] = (int)x;
+        } else if (t == GGUF_I64 || t == GGUF_U64) {
+            int64_t x;
+            memcpy(&x, p + (size_t)i * 8, 8);
+            out[i] = (int)x;
+        }
+    }
+}
+
 int hparams_from_kv(const GGUFFile *f, LlamaHParams *hp) {
     memset(hp, 0, sizeof(*hp));
     const char *arch = kv_str(f, "general.architecture", "");
-    if (strcmp(arch, "llama") != 0) die("expected llama architecture, got %s", arch);
-    hp->n_embd = kv_int(f, "llama.embedding_length", 0, 1);
-    hp->n_head = kv_int(f, "llama.attention.head_count", 0, 1);
-    hp->head_dim = kv_int(f, "llama.attention.key_length", hp->n_embd / hp->n_head, 0);
-    hp->n_layer = kv_int(f, "llama.block_count", 0, 1);
-    hp->n_ff = kv_int(f, "llama.feed_forward_length", 0, 1);
-    hp->n_head_kv = kv_int(f, "llama.attention.head_count_kv", 0, 1);
-    hp->n_rot = kv_int(f, "llama.rope.dimension_count", hp->head_dim, 0);
-    hp->n_vocab = kv_int(f, "llama.vocab_size", 0, 1);
-    hp->n_ctx = kv_int(f, "llama.context_length", 0, 1);
-    hp->rms_eps = kv_float(f, "llama.attention.layer_norm_rms_epsilon");
-    hp->rope_theta = kv_float(f, "llama.rope.freq_base");
+    const char *pfx;
+    if (strcmp(arch, "llama") == 0) {
+        hp->arch = LLM_ARCH_LLAMA;
+        pfx = "llama";
+    } else if (strcmp(arch, "qwen2") == 0) {
+        hp->arch = LLM_ARCH_QWEN2;
+        pfx = "qwen2";
+        hp->rope_neox = 1;
+    } else if (strcmp(arch, "qwen35") == 0) {
+        hp->arch = LLM_ARCH_QWEN35;
+        pfx = "qwen35";
+        hp->rope_neox = 1;
+    } else {
+        die("unsupported architecture %s", arch);
+        return -1;
+    }
+    char key[128];
+    kv_key(key, sizeof(key), pfx, "embedding_length");
+    hp->n_embd = kv_int(f, key, 0, 1);
+    kv_key(key, sizeof(key), pfx, "attention.head_count");
+    hp->n_head = kv_int(f, key, 0, 1);
+    kv_key(key, sizeof(key), pfx, "attention.key_length");
+    hp->head_dim = kv_int(f, key, hp->n_embd / hp->n_head, 0);
+    kv_key(key, sizeof(key), pfx, "block_count");
+    hp->n_layer = kv_int(f, key, 0, 1);
+    kv_key(key, sizeof(key), pfx, "feed_forward_length");
+    hp->n_ff = kv_int(f, key, 0, 1);
+    kv_key(key, sizeof(key), pfx, "attention.head_count_kv");
+    hp->n_head_kv = kv_int(f, key, 0, 1);
+    kv_key(key, sizeof(key), pfx, "rope.dimension_count");
+    hp->n_rot = kv_int(f, key, hp->head_dim, 0);
+    kv_key(key, sizeof(key), pfx, "vocab_size");
+    hp->n_vocab = kv_int(f, key, 0, 0);
+    if (hp->n_vocab <= 0) {
+        const GGUFValue *toks = gguf_get(f, "tokenizer.ggml.tokens");
+        if (toks && toks->type == GGUF_ARR) hp->n_vocab = toks->v.arr.n;
+    }
+    kv_key(key, sizeof(key), pfx, "context_length");
+    hp->n_ctx = kv_int(f, key, 0, 1);
+    kv_key(key, sizeof(key), pfx, "attention.layer_norm_rms_epsilon");
+    hp->rms_eps = kv_float(f, key, 1e-5f, 1);
+    kv_key(key, sizeof(key), pfx, "rope.freq_base");
+    hp->rope_theta = kv_float(f, key, 10000.0f, 1);
+    kv_key(key, sizeof(key), pfx, "rope.dimension_sections");
+    read_rope_sections(f, key, hp->rope_sections);
+    kv_key(key, sizeof(key), pfx, "full_attention_interval");
+    hp->full_attention_interval = kv_int(f, key, 4, 0);
+    kv_key(key, sizeof(key), pfx, "nextn_predict_layers");
+    hp->n_layer_nextn = kv_int(f, key, 0, 0);
+    if (hp->n_layer_nextn < 0) hp->n_layer_nextn = 0;
+    if (hp->n_layer_nextn >= hp->n_layer) die("nextn_predict_layers >= block_count");
+    hp->n_layer_fwd = hp->n_layer - hp->n_layer_nextn;
+    kv_key(key, sizeof(key), pfx, "ssm.conv_kernel");
+    hp->ssm_d_conv = kv_int(f, key, 0, 0);
+    kv_key(key, sizeof(key), pfx, "ssm.inner_size");
+    hp->ssm_d_inner = kv_int(f, key, 0, 0);
+    kv_key(key, sizeof(key), pfx, "ssm.state_size");
+    hp->ssm_d_state = kv_int(f, key, 0, 0);
+    kv_key(key, sizeof(key), pfx, "ssm.time_step_rank");
+    hp->ssm_dt_rank = kv_int(f, key, 0, 0);
+    kv_key(key, sizeof(key), pfx, "ssm.group_count");
+    hp->ssm_n_group = kv_int(f, key, 0, 0);
+    /* Qwen3.5-9B / MiniCPM: thinking off. GGUF jinja turns it on when the kwarg
+       is omitted, which streams a long CoT (and often a repetition loop). */
+    hp->enable_thinking = 0;
     hp->bos_id = kv_int(f, "tokenizer.ggml.bos_token_id", 1, 0);
     hp->eos_id = kv_int(f, "tokenizer.ggml.eos_token_id", 2, 0);
     hp->unk_id = kv_int(f, "tokenizer.ggml.unknown_token_id", 0, 0);
@@ -313,14 +394,17 @@ int hparams_from_kv(const GGUFFile *f, LlamaHParams *hp) {
     hp->add_space_prefix = kv_int(f, "tokenizer.ggml.add_space_prefix", 0, 0);
     hp->chat_template = xstrdup(kv_str(f, "tokenizer.chat_template", ""));
     hp->tokenizer_pre = xstrdup(kv_str(f, "tokenizer.ggml.pre", ""));
+    hp->model_name = xstrdup(kv_str(f, "general.name", ""));
     return 0;
 }
 
 void hparams_free(LlamaHParams *hp) {
     free(hp->chat_template);
     free(hp->tokenizer_pre);
+    free(hp->model_name);
     hp->chat_template = NULL;
     hp->tokenizer_pre = NULL;
+    hp->model_name = NULL;
 }
 
 static uint64_t n_elements_u64(const TensorInfo *info) {
@@ -352,6 +436,12 @@ static float *dequant_tensor(const GGUFFile *gguf, const TensorInfo *info) {
         if (dequantize_f32(blob, n, flat) != 0) die("f32 dequant failed for %s", info->name);
     } else if (info->ggml_type == GGML_Q8_0) {
         if (dequantize_q8_0(blob, n, flat) != 0) die("Q8_0 dequant failed for %s", info->name);
+    } else if (info->ggml_type == GGML_Q4_K) {
+        if (dequantize_q4_k(blob, n, flat) != 0) die("Q4_K dequant failed for %s", info->name);
+    } else if (info->ggml_type == GGML_Q6_K) {
+        if (dequantize_q6_k(blob, n, flat) != 0) die("Q6_K dequant failed for %s", info->name);
+    } else if (info->ggml_type == GGML_IQ4_XS) {
+        if (dequantize_iq4_xs(blob, n, flat) != 0) die("IQ4_XS dequant failed for %s", info->name);
     } else {
         die("unsupported ggml type %d for %s", info->ggml_type, info->name);
     }

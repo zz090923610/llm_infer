@@ -19,7 +19,7 @@ void generate_state_init(GenerateState *st, LlamaModel *model, Tokenizer *tok, K
     st->model = model;
     st->tok = tok;
     st->own_cache = cache == NULL;
-    st->cache = cache ? cache : llama_model_new_cache(model, 1, model->hparams.n_ctx);
+    st->cache = cache ? cache : llama_model_new_cache(model, 1, 0);
     st->max_tokens = max_tokens;
     st->temperature = temperature;
     st->top_k = top_k;
@@ -125,7 +125,7 @@ IntVec *generate_batch(LlamaModel *model, Tokenizer *tok, char **prompts, int n_
     int *batch = xmalloc((size_t)n_prompts * (size_t)slen * sizeof(int));
     as_batch(id_lists, lengths, n_prompts, hp->pad_id, slen, batch);
 
-    KVCache *cache = llama_model_new_cache(model, n_prompts, hp->n_ctx);
+    KVCache *cache = llama_model_new_cache(model, n_prompts, 0);
     float *logits = llama_model_forward(model, batch, n_prompts, slen, cache, lengths, NULL);
 
     IntVec *out = xcalloc((size_t)n_prompts, sizeof(IntVec));

@@ -1,10 +1,13 @@
 #include "tensor.h"
 #include "backend.h"
+#include "attn.h"
+#include "rope.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <float.h>
 
 static int fails;
 static uint32_t rng_state = 1u;
@@ -185,6 +188,230 @@ static void test_linear_f16_texel(int n_out, int n_in) {
     free(ref);
 }
 
+static void check_close_abs(const float *got, const float *ref, int n, float tol, const char *tag) {
+    for (int i = 0; i < n; i++) {
+        float e = fabsf(got[i] - ref[i]);
+        if (e > tol) {
+            fprintf(stderr, "FAIL: %s[%d] got=%g ref=%g err=%g tol=%g\n", tag, i, got[i], ref[i], e,
+                    tol);
+            fails++;
+            return;
+        }
+    }
+}
+
+static void apply_rope_ref(float *x, const float *cos_tab, const float *sin_tab, const int *positions,
+                           int B, int n_head, int S, int head_dim) {
+    int pairs = head_dim / 2;
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < n_head; h++) {
+            for (int s = 0; s < S; s++) {
+                int pos = positions[b * S + s];
+                float *row = x + ((((size_t)b * n_head + (size_t)h) * S + (size_t)s) * (size_t)head_dim);
+                const float *c = cos_tab + (size_t)pos * (size_t)head_dim;
+                const float *si = sin_tab + (size_t)pos * (size_t)head_dim;
+                for (int i = 0; i < pairs; i++) {
+                    float x0 = row[2 * i];
+                    float x1 = row[2 * i + 1];
+                    float cv = c[2 * i];
+                    float sv = si[2 * i];
+                    row[2 * i] = x0 * cv - x1 * sv;
+                    row[2 * i + 1] = x0 * sv + x1 * cv;
+                }
+            }
+        }
+    }
+}
+
+static void apply_rope_neox_ref(float *x, const float *cos_tab, const float *sin_tab,
+                                const int *positions, int B, int n_head, int S, int head_dim,
+                                int n_rot) {
+    int half = n_rot / 2;
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < n_head; h++) {
+            for (int s = 0; s < S; s++) {
+                int pos = positions[b * S + s];
+                float *row = x + ((((size_t)b * n_head + (size_t)h) * S + (size_t)s) * (size_t)head_dim);
+                const float *c = cos_tab + (size_t)pos * (size_t)n_rot;
+                const float *si = sin_tab + (size_t)pos * (size_t)n_rot;
+                for (int i = 0; i < half; i++) {
+                    float x0 = row[i];
+                    float x1 = row[i + half];
+                    float cv = c[2 * i];
+                    float sv = si[2 * i];
+                    row[i] = x0 * cv - x1 * sv;
+                    row[i + half] = x0 * sv + x1 * cv;
+                }
+            }
+        }
+    }
+}
+
+static void test_apply_rope(void) {
+    const int B = 1, H = 3, S = 4, d = 64, seq = 8;
+    int n = B * H * S * d;
+    float *x = malloc((size_t)n * sizeof(float));
+    float *ref = malloc((size_t)n * sizeof(float));
+    float *cos_tab = malloc((size_t)seq * d * sizeof(float));
+    float *sin_tab = malloc((size_t)seq * d * sizeof(float));
+    int pos[4] = {0, 1, 2, 7};
+    expect_eq(x && ref && cos_tab && sin_tab, "alloc rope");
+    if (!x || !ref || !cos_tab || !sin_tab) return;
+    fill_rand(x, n);
+    memcpy(ref, x, (size_t)n * sizeof(float));
+    build_rope_cache(cos_tab, sin_tab, seq, d, 10000.0f);
+    apply_rope(x, cos_tab, sin_tab, pos, B, H, S, d);
+    llm_backend_sync();
+    apply_rope_ref(ref, cos_tab, sin_tab, pos, B, H, S, d);
+    check_close_abs(x, ref, n, 1e-5f, "apply_rope");
+    free(x);
+    free(ref);
+    free(cos_tab);
+    free(sin_tab);
+}
+
+static void test_apply_rope_neox(void) {
+    const int B = 1, H = 2, S = 3, d = 256, n_rot = 64, seq = 8;
+    int n = B * H * S * d;
+    float *x = malloc((size_t)n * sizeof(float));
+    float *ref = malloc((size_t)n * sizeof(float));
+    float *cos_tab = malloc((size_t)seq * n_rot * sizeof(float));
+    float *sin_tab = malloc((size_t)seq * n_rot * sizeof(float));
+    int pos[3] = {0, 3, 5};
+    expect_eq(x && ref && cos_tab && sin_tab, "alloc rope neox");
+    if (!x || !ref || !cos_tab || !sin_tab) return;
+    fill_rand(x, n);
+    memcpy(ref, x, (size_t)n * sizeof(float));
+    build_rope_cache_n(cos_tab, sin_tab, seq, n_rot, 1000000.0f);
+    apply_rope_neox(x, cos_tab, sin_tab, pos, B, H, S, d, n_rot);
+    llm_backend_sync();
+    apply_rope_neox_ref(ref, cos_tab, sin_tab, pos, B, H, S, d, n_rot);
+    check_close_abs(x, ref, n, 1e-5f, "apply_rope_neox");
+    {
+        const int d2 = 128;
+        int n2 = B * H * S * d2;
+        float *x2 = malloc((size_t)n2 * sizeof(float));
+        float *r2 = malloc((size_t)n2 * sizeof(float));
+        float *c2 = malloc((size_t)seq * d2 * sizeof(float));
+        float *s2 = malloc((size_t)seq * d2 * sizeof(float));
+        expect_eq(x2 && r2 && c2 && s2, "alloc rope neox full");
+        if (x2 && r2 && c2 && s2) {
+            fill_rand(x2, n2);
+            memcpy(r2, x2, (size_t)n2 * sizeof(float));
+            build_rope_cache_n(c2, s2, seq, d2, 10000.0f);
+            apply_rope_neox(x2, c2, s2, pos, B, H, S, d2, d2);
+            llm_backend_sync();
+            apply_rope_neox_ref(r2, c2, s2, pos, B, H, S, d2, d2);
+            check_close_abs(x2, r2, n2, 1e-5f, "apply_rope_neox_full");
+        }
+        free(x2);
+        free(r2);
+        free(c2);
+        free(s2);
+    }
+    free(x);
+    free(ref);
+    free(cos_tab);
+    free(sin_tab);
+}
+
+static void softmax_ref(float *x, int n) {
+    float m = -FLT_MAX;
+    for (int i = 0; i < n; i++) {
+        float v = isfinite(x[i]) ? x[i] : -1e9f;
+        x[i] = v;
+        if (v > m) m = v;
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        x[i] = expf(x[i] - m);
+        sum += x[i];
+    }
+    float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
+    for (int i = 0; i < n; i++) x[i] *= inv;
+}
+
+static void attn_gqa_ref(float *y, float *attn, const float *q, const float *cache_k,
+                         const float *cache_v, size_t batch_stride, size_t head_stride,
+                         const int *positions, const int *valid_len, const int *key_len, int B,
+                         int n_head, int S, int n_head_kv, int head_dim, int max_k, float scale) {
+    int n_rep = n_head / n_head_kv;
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < n_head; h++) {
+            int kv_h = h / n_rep;
+            for (int s = 0; s < S; s++) {
+                float *row = attn + ((((size_t)b * n_head + (size_t)h) * (size_t)S + (size_t)s) *
+                                     (size_t)max_k);
+                int qpos = positions[b * S + s];
+                int q_valid = s < valid_len[b];
+                const float *qrow = q + ((((size_t)b * n_head + (size_t)h) * (size_t)S + (size_t)s) *
+                                         (size_t)head_dim);
+                for (int kp = 0; kp < max_k; kp++) {
+                    if (!q_valid || kp > qpos || kp >= key_len[b]) {
+                        row[kp] = -INFINITY;
+                        continue;
+                    }
+                    const float *krow = cache_k + (size_t)b * batch_stride + (size_t)kv_h * head_stride +
+                                        (size_t)kp * (size_t)head_dim;
+                    float acc = 0.0f;
+                    for (int i = 0; i < head_dim; i++) acc += qrow[i] * krow[i];
+                    row[kp] = acc * scale;
+                }
+                softmax_ref(row, max_k);
+                float *yrow = y + ((((size_t)b * n_head + (size_t)h) * (size_t)S + (size_t)s) *
+                                   (size_t)head_dim);
+                memset(yrow, 0, (size_t)head_dim * sizeof(float));
+                for (int kp = 0; kp < max_k; kp++) {
+                    float p = row[kp];
+                    if (p == 0.0f) continue;
+                    const float *vrow = cache_v + (size_t)b * batch_stride + (size_t)kv_h * head_stride +
+                                        (size_t)kp * (size_t)head_dim;
+                    for (int i = 0; i < head_dim; i++) yrow[i] += p * vrow[i];
+                }
+            }
+        }
+    }
+}
+
+static void test_attn_gqa(void) {
+    const int B = 1, H = 4, KV = 2, S = 2, d = 128, max_k = 8;
+    size_t head_stride = (size_t)max_k * (size_t)d;
+    size_t batch_stride = (size_t)KV * head_stride;
+    int nq = B * H * S * d;
+    int nk = B * KV * max_k * d;
+    float *q = malloc((size_t)nq * sizeof(float));
+    float *ck = malloc((size_t)nk * sizeof(float));
+    float *cv = malloc((size_t)nk * sizeof(float));
+    float *y = malloc((size_t)nq * sizeof(float));
+    float *yref = malloc((size_t)nq * sizeof(float));
+    float *attn = malloc((size_t)B * H * S * max_k * sizeof(float));
+    float *areff = malloc((size_t)B * H * S * max_k * sizeof(float));
+    int pos[2] = {5, 6};
+    int valid[1] = {2};
+    int klen[1] = {7};
+    expect_eq(q && ck && cv && y && yref && attn && areff, "alloc attn");
+    if (!q || !ck || !cv || !y || !yref || !attn || !areff) return;
+    fill_rand(q, nq);
+    fill_rand(ck, nk);
+    fill_rand(cv, nk);
+    memset(y, 0, (size_t)nq * sizeof(float));
+    memset(yref, 0, (size_t)nq * sizeof(float));
+    float scale = 1.0f / sqrtf((float)d);
+    attn_gqa(y, attn, q, ck, cv, batch_stride, head_stride, pos, valid, klen, B, H, S, KV, d, max_k,
+             scale);
+    llm_backend_sync();
+    attn_gqa_ref(yref, areff, q, ck, cv, batch_stride, head_stride, pos, valid, klen, B, H, S, KV, d,
+                 max_k, scale);
+    check_close_abs(y, yref, nq, 2e-4f, "attn_gqa");
+    free(q);
+    free(ck);
+    free(cv);
+    free(y);
+    free(yref);
+    free(attn);
+    free(areff);
+}
+
 int main(void) {
     llm_backend_set_threads(4);
     const int n_ins[] = {960, 2560, 7, 64};
@@ -202,6 +429,9 @@ int main(void) {
     test_linear_rows_add_shape(5, 960, 960);
     test_linear_f16_texel(960, 960);
     test_linear_f16_texel(16, 960);
+    test_apply_rope();
+    test_apply_rope_neox();
+    test_attn_gqa();
     if (fails) {
         fprintf(stderr, "%d failure(s)\n", fails);
         return 1;

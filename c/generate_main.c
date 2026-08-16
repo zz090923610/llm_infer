@@ -1,6 +1,7 @@
 #include "generate.h"
 #include "gguf.h"
 #include "backend.h"
+#include "cache.h"
 #include "util.h"
 
 #ifndef LLM_DEFAULT_MODEL
@@ -11,7 +12,7 @@ static void usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--prompt TEXT] [--max-tokens N] [--temp F] [--top-p F] "
             "[--top-k N] [--seed N] [--threads N] [--prefill-threads N] [--decode-threads N] "
-            "[--batch-demo]\n",
+            "[--batch-demo] [--ctx N] [--think]\n",
             argv0);
 }
 
@@ -27,6 +28,8 @@ int main(int argc, char **argv) {
     int n_prefill = 0;
     int n_decode = 0;
     uint64_t seed = 0;
+    int ctx = 0;
+    int enable_thinking = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
@@ -40,6 +43,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--prefill-threads") == 0 && i + 1 < argc) n_prefill = atoi(argv[++i]);
         else if (strcmp(argv[i], "--decode-threads") == 0 && i + 1 < argc) n_decode = atoi(argv[++i]);
         else if (strcmp(argv[i], "--batch-demo") == 0) batch_demo = 1;
+        else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--think") == 0) enable_thinking = 1;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -64,12 +69,13 @@ int main(int argc, char **argv) {
     LoadedModel *loaded = load_model(model_path, 1, 1);
     LlamaModel *model = llama_model_init(loaded);
     Tokenizer *tok = tokenizer_from_gguf(loaded->gguf, &loaded->hparams);
+    tok->hparams.enable_thinking = enable_thinking;
 
     if (batch_demo) {
         ChatMessage m0 = {"user", "Say hi in one word."};
         ChatMessage m1 = {"user", "2+2="};
-        char *p0 = apply_chat_template(&m0, 1, 1);
-        char *p1 = apply_chat_template(&m1, 1, 1);
+        char *p0 = apply_chat_template(tok, &m0, 1, 1);
+        char *p1 = apply_chat_template(tok, &m1, 1, 1);
         char *prompts[2] = {p0, p1};
         printf("batched greedy decode:\n");
         fflush(stdout);
@@ -86,8 +92,11 @@ int main(int argc, char **argv) {
         free(p1);
     } else {
         ChatMessage msg = {"user", (char *)prompt};
-        char *text = apply_chat_template(&msg, 1, 1);
-        char *out = generate_text(model, tok, text, max_tokens, temp, top_k, top_p, 1, 1, NULL, seed);
+        char *text = apply_chat_template(tok, &msg, 1, 1);
+        KVCache *cache = NULL;
+        if (ctx > 0) cache = llama_model_new_cache(model, 1, ctx);
+        char *out = generate_text(model, tok, text, max_tokens, temp, top_k, top_p, 1, 1, cache, seed);
+        if (cache) kvcache_free(cache);
         free(out);
         free(text);
     }

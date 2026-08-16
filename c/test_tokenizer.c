@@ -49,7 +49,7 @@ int main(void) {
     }
 
     ChatMessage msg = {"user", "Hi"};
-    char *prompt = apply_chat_template(&msg, 1, 1);
+    char *prompt = apply_chat_template(tok, &msg, 1, 1);
     intvec_init(&ids);
     tokenizer_encode(tok, prompt, 1, &ids);
     if (ids.n < 1 || ids.data[0] != im_start) {

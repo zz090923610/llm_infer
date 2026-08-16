@@ -11,7 +11,7 @@
  *   attn.h    — GQA attention, head pack/merge, KV cache store
  *
  * Current: cpu (portable scalar C),
- *          x86_64 (AVX2/FMA GEMV/GEMM + pthread pool),
+ *          x86_64 (AVX2/FMA GEMV/GEMM, GQA, RoPE, GDN + pthread pool),
  *          aarch64 (NEON FMA GEMV/GEMM + pthread pool; OnePlus Ace 5 / SD 8 Gen 3),
  *          gpu (Vulkan compute; Adreno 750 on Ace 5).
  * Later:   npu — same symbols, different impl.

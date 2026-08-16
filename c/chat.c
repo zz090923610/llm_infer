@@ -18,7 +18,7 @@ static double monotonic_now(void) {
 static void usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--max-tokens N] [--temp F] [--top-p F] [--top-k N] [--ctx N] "
-            "[--threads N] [--prefill-threads N] [--decode-threads N]\n",
+            "[--think] [--threads N] [--prefill-threads N] [--decode-threads N]\n",
             argv0);
 }
 
@@ -53,14 +53,23 @@ int main(int argc, char **argv) {
     int n_threads = 0;
     int n_prefill = 0;
     int n_decode = 0;
+    int enable_thinking = 0;
+    int set_temp = 0, set_top_p = 0, set_top_k = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
         else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) max_tokens = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) temp = (float)atof(argv[++i]);
-        else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) top_p = (float)atof(argv[++i]);
-        else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) {
+            temp = (float)atof(argv[++i]);
+            set_temp = 1;
+        } else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
+            top_p = (float)atof(argv[++i]);
+            set_top_p = 1;
+        } else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) {
+            top_k = atoi(argv[++i]);
+            set_top_k = 1;
+        } else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--think") == 0) enable_thinking = 1;
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) n_threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--prefill-threads") == 0 && i + 1 < argc) n_prefill = atoi(argv[++i]);
         else if (strcmp(argv[i], "--decode-threads") == 0 && i + 1 < argc) n_decode = atoi(argv[++i]);
@@ -88,6 +97,13 @@ int main(int argc, char **argv) {
     LoadedModel *loaded = load_model(model_path, 1, 1);
     LlamaModel *model = llama_model_init(loaded);
     Tokenizer *tok = tokenizer_from_gguf(loaded->gguf, &loaded->hparams);
+    tok->hparams.enable_thinking = enable_thinking;
+    if (tok->hparams.arch == LLM_ARCH_QWEN2 || tok->hparams.arch == LLM_ARCH_QWEN35) {
+        /* Qwen3 non-thinking defaults. Unconstrained 0.8/0.9 sampling repeats and derails. */
+        if (!set_temp) temp = 0.7f;
+        if (!set_top_p) top_p = 0.8f;
+        if (!set_top_k) top_k = 20;
+    }
     KVCache *cache = llama_model_new_cache(model, 1, ctx);
 
     ChatMessage *history = NULL;
@@ -95,7 +111,8 @@ int main(int argc, char **argv) {
     IntVec cached_ids;
     intvec_init(&cached_ids);
 
-    printf("Chat ready. Empty line or /exit to quit, /reset to clear history.\n\n");
+    printf("Chat ready (temp=%.2f top-p=%.2f top-k=%d). Empty line or /exit to quit, /reset to clear history.\n\n",
+           temp, top_p, top_k);
     char *line = NULL;
     size_t linecap = 0;
     for (;;) {
@@ -133,7 +150,7 @@ int main(int argc, char **argv) {
         history[nh].content = xstrdup(user);
         nh++;
 
-        char *full = apply_chat_template(history, nh, 1);
+        char *full = apply_chat_template(tok, history, nh, 1);
         IntVec ids;
         intvec_init(&ids);
         tokenizer_encode(tok, full, 1, &ids);
