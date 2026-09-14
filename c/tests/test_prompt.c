@@ -32,7 +32,7 @@ static int fails;
 
 static int checksum_slack(void) {
     const char *b = llm_backend_name();
-    return strcmp(b, "cpu") != 0;
+    return strcmp(b, "plain-cpu") != 0;
 }
 
 static int file_exists(const char *path) {

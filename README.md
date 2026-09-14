@@ -13,16 +13,16 @@ cmake -B build
 cmake --build build -j
 ```
 
-Default `LLM_BACKEND=all` suffixes binaries (`generate-cpu`, `chat-x86_64`, `test_linear-pim`, …).
+Default `LLM_BACKEND=all` suffixes binaries (`generate-plain-cpu`, `chat-x86_64-simd`, `test_linear-pim`, …).
 
 | `-DLLM_BACKEND=` | Kernels | Binary names |
 | --- | --- | --- |
 | `all` (default) | all available | `chat-<be>`, `generate-<be>`, `test_*-<be>` |
-| `cpu` | scalar C | unsuffixed `chat`, `generate`, … |
-| `x86_64` | AVX2/FMA + pthread pool | unsuffixed |
-| `pim` | decode GEMV via `pim_func` (attn/RoPE/prefill still x86 kernels on this host) | unsuffixed |
-| `gpu` | Vulkan (if found) | unsuffixed |
-| `aarch64` | NEON (this host or cross) | unsuffixed |
+| `plain-cpu` | scalar C (`c/backends/host/pc/plain-cpu`) | unsuffixed `chat`, `generate`, … |
+| `x86_64-simd` | AVX2/FMA + pthread pool (`c/backends/host/pc/x86_64-simd`) | unsuffixed |
+| `pim` | decode GEMV via `pim_func` (attn/RoPE/prefill still x86 kernels on this host; `c/backends/pim`) | unsuffixed |
+| `gpu` | Vulkan (`c/backends/host/android/gpu`) | unsuffixed |
+| `aarch64-simd` | NEON (`c/backends/host/android/aarch64-simd`; this host or Android NDK) | unsuffixed |
 
 Host builds bake `LLM_DEFAULT_MODEL` to `models/smollm2-360m-instruct-q8_0.gguf`. Cross/Android must pass `--model`.
 
@@ -30,11 +30,11 @@ Host builds bake `LLM_DEFAULT_MODEL` to `models/smollm2-360m-instruct-q8_0.gguf`
 
 ```bash
 # scalar CPU
-./build/generate-cpu --prompt "Hello" --temp 0 --max-tokens 16
-./build/chat-cpu --temp 0 --max-tokens 64
+./build/generate-plain-cpu --prompt "Hello" --temp 0 --max-tokens 16
+./build/chat-plain-cpu --temp 0 --max-tokens 64
 
 # AVX2
-./build/generate-x86_64 --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-x86_64-simd --prompt "Hello" --temp 0 --max-tokens 16
 
 # PIM Device in-process (default PIM_ISSUE=host)
 ./build/generate-pim --prompt "Hello" --temp 0 --max-tokens 16
@@ -43,10 +43,10 @@ Host builds bake `LLM_DEFAULT_MODEL` to `models/smollm2-360m-instruct-q8_0.gguf`
 
 `chat`: empty line or `/exit` quits; `/reset` clears history.
 
-Single-backend configure (`-DLLM_BACKEND=cpu` or `pim`) uses the unsuffixed names from LEARN.md. Reconfigure the same `build/` dir, or use a second tree:
+Single-backend configure (`-DLLM_BACKEND=plain-cpu` or `pim`) uses the unsuffixed names from LEARN.md. Reconfigure the same `build/` dir, or use a second tree:
 
 ```bash
-cmake -B build -DLLM_BACKEND=cpu && cmake --build build -j
+cmake -B build -DLLM_BACKEND=plain-cpu && cmake --build build -j
 ./build/generate --prompt "Hello" --temp 0 --max-tokens 16
 ```
 
@@ -71,11 +71,11 @@ PIM_ISSUE=host ./build/generate-pim --prompt Hello --temp 0 --max-tokens 2
 ```bash
 ctest --test-dir build --output-on-failure
 # or
-./build/test_linear-cpu
+./build/test_linear-plain-cpu
 ./build/test_linear-pim
-./build/test_quant-cpu
-./build/test_tokenizer-cpu
-./build/test_prompt-cpu
+./build/test_quant-plain-cpu
+./build/test_tokenizer-plain-cpu
+./build/test_prompt-plain-cpu
 ./build/test_planner-pim
 ```
 

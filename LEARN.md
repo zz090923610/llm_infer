@@ -41,10 +41,10 @@ Host build/run (CPU, AVX, PIM without gem5): [README.md](README.md).
 | On disk | ~369 MB Q8_0 | 290 tensors |
 | In RAM after load | ~1.35 GiB f32 | Then the mmap is dropped |
 
-Build and run (see [README.md](README.md)): `cmake -B build && cmake --build build -j`. Default `all` suffixes binaries (`generate-cpu`, `chat-pim`, …). `-DLLM_BACKEND=cpu` keeps unsuffixed `generate` / `chat`.
+Build and run (see [README.md](README.md)): `cmake -B build && cmake --build build -j`. Default `all` suffixes binaries (`generate-plain-cpu`, `chat-pim`, …). `-DLLM_BACKEND=plain-cpu` keeps unsuffixed `generate` / `chat`.
 
 ```
-./build/generate-cpu --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-plain-cpu --prompt "Hello" --temp 0 --max-tokens 16
 ```
 
 ```
@@ -55,7 +55,7 @@ Hello, I'm here to assist you with any language-related questions or problems
 [16 tokens, 34 tok/s]
 ```
 
-`build/test_quant-cpu` and `build/test_tokenizer-cpu` both pass (`ctest --test-dir build`).
+`build/test_quant-plain-cpu` and `build/test_tokenizer-plain-cpu` both pass (`ctest --test-dir build`).
 
 ```mermaid
 flowchart TD
@@ -138,20 +138,20 @@ Skim [`py/README.md`](py/README.md) for the same module table on the Python side
 
 ```bash
 # greedy one-shot (deterministic)
-./build/generate-cpu --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-plain-cpu --prompt "Hello" --temp 0 --max-tokens 16
 
 # AVX2, or PIM in-process Device (no gem5)
-./build/generate-x86_64 --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-x86_64-simd --prompt "Hello" --temp 0 --max-tokens 16
 ./build/generate-pim --prompt "Hello" --temp 0 --max-tokens 16
 
 # sampled (default temp 0.8, top_p 0.9)
-./build/generate-cpu --prompt "Hello" --max-tokens 32
+./build/generate-plain-cpu --prompt "Hello" --max-tokens 32
 
 # two prompts in one padded batch
-./build/generate-cpu --batch-demo --max-tokens 16
+./build/generate-plain-cpu --batch-demo --max-tokens 16
 
 # interactive (empty line or /exit to quit, /reset to clear history)
-./build/chat-cpu --temp 0 --max-tokens 64
+./build/chat-plain-cpu --temp 0 --max-tokens 64
 ```
 
 PIM desktop runs use `PIM_ISSUE=host` (the default). Do not set `mmio`/`shm` unless you are on the gem5/hybrid path. Full usage: [README.md](README.md).
@@ -345,7 +345,7 @@ flowchart LR
     outNorm --> logits[last_token_logits]
 ```
 
-### 3.2 `backends/cpu/tensor.c` / `tensor.h`
+### 3.2 `backends/host/pc/plain-cpu/tensor.c` / `tensor.h`
 
 No tensor object. Everything is `float *` plus explicit sizes.
 
@@ -359,14 +359,14 @@ No tensor object. Everything is `float *` plus explicit sizes.
 | `vec_add` / `vec_mul` | Residual add; SwiGLU product |
 | `argmax_f32` | Greedy sample |
 
-### 3.3 `backends/cpu/rope.c` / `rope.h`
+### 3.3 `backends/host/pc/plain-cpu/rope.c` / `rope.h`
 
 - `build_rope_cache(cos, sin, seq_len, head_dim, theta)` — tables used by every layer.
 - `apply_rope(x, cos, sin, positions, B, n_head, S, head_dim)` — in-place on `x` shaped `(B, n_head, S, head_dim)`. `positions` is `(B, S)`.
 
 Decode (`S=1`) still gets the right rotation because `positions[b,0] = cache.n_seq[b]`, not 0.
 
-Attention kernels live in `backends/cpu/attn.c` (`attn_pack_heads`, `attn_cache_store`, `attn_gqa`, `attn_merge_heads`). `model.c` is the layer graph; `-DLLM_BACKEND=cpu` selects this scalar backend.
+Attention kernels live in `backends/host/pc/plain-cpu/attn.c` (`attn_pack_heads`, `attn_cache_store`, `attn_gqa`, `attn_merge_heads`). `model.c` is the layer graph; `-DLLM_BACKEND=plain-cpu` selects this scalar backend.
 
 ### 3.4 `cache.c` / `cache.h`
 
@@ -587,7 +587,7 @@ Second case: two blocks, scale 1.0 with qs=1 → all 1.0; scale 2.0 with qs=3 �
 Ragged `n_elements % 32 != 0` is rejected.
 
 ```bash
-./build/test_quant-cpu
+./build/test_quant-plain-cpu
 ```
 
 ### 4.5 Name map onto `LayerWeights`
@@ -658,7 +658,7 @@ A token is **special** if its type is unknown/control/user-defined, or it matche
 `c/tests/test_tokenizer.c`: encode `"Hello, world! 123 cats."` with `parse_special=0`, decode must equal input. Then ChatML `"Hi"` with `parse_special=1`: first ID is `<|im_start|>`, and `<|im_end|>` appears. Also checks `stop_ids` contains `eos`, `"END"`, `"ĠEND"`.
 
 ```bash
-./build/test_tokenizer-cpu
+./build/test_tokenizer-plain-cpu
 ```
 
 ### 5.4 Pretok and Unicode
@@ -742,10 +742,12 @@ Core: `util.c`, `hashmap.c`, `heap.c`, `quant.c`, `gguf.c`, `unicode.c`, `unicod
 
 | `-DLLM_BACKEND` | Extra sources | Notes |
 | --- | --- | --- |
-| `cpu` | `c/backends/cpu/{backend,tensor,rope,attn}.c` | Scalar reference |
-| `x86_64` | `c/backends/x86_64/*` | AVX2/FMA + pool |
+| `plain-cpu` | `c/backends/host/pc/plain-cpu/{backend,tensor,rope,attn}.c` | Scalar reference |
+| `x86_64-simd` | `c/backends/host/pc/x86_64-simd/*` | AVX2/FMA + pool |
 | `pim` | `c/backends/pim/*` + `pim_func` | Decode GEMV on Device; host default `PIM_ISSUE=host` |
-| `all` | every available | Suffixed bins: `generate-cpu`, `test_linear-pim`, … |
+| `aarch64-simd` | `c/backends/host/android/aarch64-simd/*` | NEON + pool (Android NDK) |
+| `gpu` | `c/backends/host/android/gpu/*` | Vulkan |
+| `all` | every available | Suffixed bins: `generate-plain-cpu`, `test_linear-pim`, … |
 
 **Not in the library:**
 
@@ -793,12 +795,14 @@ The process still needs ~1.35 GiB free RAM for f32 weights, plus the KV cache.
 | `c/include/quant.h` + `c/quant.c` | Q8_0 / f32 / fp16 |
 | `c/include/gguf.h` + `c/gguf.c` | GGUF v3 mmap + dequant load |
 | `c/include/tokenizer.h` + `c/tokenizer.c` | ChatML, pretok, BPE, stream decode |
-| `c/include/backend.h` + `c/backends/cpu/backend.c` | Compile-time backend name |
-| `c/include/tensor.h` + `c/backends/cpu/tensor.c` | linear, RMSNorm, SiLU, softmax |
-| `c/include/rope.h` + `c/backends/cpu/rope.c` | Consecutive-pair RoPE |
-| `c/include/attn.h` + `c/backends/cpu/attn.c` | GQA attention, head pack/merge, KV store |
-| `c/backends/x86_64/` | AVX2 linear/attn/RoPE + pthread pool |
+| `c/include/backend.h` + `c/backends/host/pc/plain-cpu/backend.c` | Compile-time backend name |
+| `c/include/tensor.h` + `c/backends/host/pc/plain-cpu/tensor.c` | linear, RMSNorm, SiLU, softmax |
+| `c/include/rope.h` + `c/backends/host/pc/plain-cpu/rope.c` | Consecutive-pair RoPE |
+| `c/include/attn.h` + `c/backends/host/pc/plain-cpu/attn.c` | GQA attention, head pack/merge, KV store |
+| `c/backends/host/pc/x86_64-simd/` | AVX2 linear/attn/RoPE + pthread pool |
 | `c/backends/pim/` | GEMV planner + intern; host Device or gem5 issue |
+| `c/backends/host/android/aarch64-simd/` | NEON linear + pthread pool |
+| `c/backends/host/android/gpu/` | Vulkan compute |
 | `c/include/cache.h` + `c/cache.c` | K/V arena + `n_seq` |
 | `c/include/model.h` + `c/model.c` | Llama forward (calls backend kernels) |
 | `c/include/sampler.h` + `c/sampler.c` | Greedy / temp / top-k / top-p |
@@ -809,8 +813,9 @@ The process still needs ~1.35 GiB free RAM for f32 weights, plus the KV cache.
 | `c/tests/test_tokenizer.c` | Roundtrip + ChatML specials |
 | `c/tests/test_linear.c` | Kernel golden vs scalar ref |
 | `c/tests/test_prompt.c` | Prompt-level golden + linear dump |
-| `c/CMakeLists.txt` | lib + bins + host tests; `-DLLM_BACKEND` (`all` / `cpu` / `x86_64` / `pim` / …) |
-| `c/backends/cpu/CMakeLists.txt` | Scalar CPU kernel sources |
+| `c/tests/test_planner.cpp` | PIM GEMV planner unit tests |
+| `c/CMakeLists.txt` | lib + bins + host tests; `-DLLM_BACKEND` (`all` / `plain-cpu` / `x86_64-simd` / `pim` / …) |
+| `c/backends/host/pc/plain-cpu/CMakeLists.txt` | Scalar CPU kernel sources |
 | `README.md` | Host usage, `PIM_ISSUE`, tests (no gem5) |
 | `c/scripts/build-android.sh` | NDK cross-compile |
 | `c/scripts/adb-push.sh` | adb deploy + linker64 hint |

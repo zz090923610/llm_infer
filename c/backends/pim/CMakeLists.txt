@@ -3,9 +3,9 @@
 
 set(_PIM_FUNC_DIR "")
 foreach(_cand
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../pim_func"
-        "${CMAKE_CURRENT_LIST_DIR}/../../../pim_func"
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../gem5_se/pim_func")
+        "${LLM_C_DIR}/../../pim_func"
+        "${LLM_C_DIR}/../pim_func"
+        "${LLM_C_DIR}/../../gem5_se/pim_func")
   get_filename_component(_abs "${_cand}" ABSOLUTE)
   if(EXISTS "${_abs}/CMakeLists.txt")
     set(_PIM_FUNC_DIR "${_abs}")
@@ -32,9 +32,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
       ${CMAKE_CURRENT_SOURCE_DIR}/cpu_kernels.c
       ${CMAKE_CURRENT_SOURCE_DIR}/planner.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/gemv.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../x86_64/pool.c
-      ${CMAKE_CURRENT_SOURCE_DIR}/../x86_64/rope.c
-      ${CMAKE_CURRENT_SOURCE_DIR}/../x86_64/attn.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../host/pc/x86_64-simd/pool.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../host/pc/x86_64-simd/rope.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../host/pc/x86_64-simd/attn.c
       PARENT_SCOPE
   )
 else()
@@ -44,8 +44,8 @@ else()
       ${CMAKE_CURRENT_SOURCE_DIR}/cpu_kernels.c
       ${CMAKE_CURRENT_SOURCE_DIR}/planner.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/gemv.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/rope.c
-      ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/attn.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../host/pc/plain-cpu/rope.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../host/pc/plain-cpu/attn.c
       PARENT_SCOPE
   )
 endif()

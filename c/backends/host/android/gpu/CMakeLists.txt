@@ -23,8 +23,8 @@ set(_GPU_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/rope.c
     ${CMAKE_CURRENT_SOURCE_DIR}/attn.c
 )
-# On-demand Q4_K / Q6_K / IQ4_XS GEMV runs on the CPU. Reuse the aarch64 pool.
+# On-demand Q4_K / Q6_K / IQ4_XS GEMV runs on the CPU. Reuse the aarch64-simd pool.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-  list(APPEND _GPU_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../aarch64/pool.c)
+  list(APPEND _GPU_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../aarch64-simd/pool.c)
 endif()
 set(LLM_BACKEND_SOURCES ${_GPU_SOURCES} PARENT_SCOPE)

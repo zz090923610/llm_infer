@@ -26,7 +26,7 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 # NEON + pthread backend for Snapdragon 8 Gen 3 (OnePlus Ace 5).
 # GPU: LLM_BACKEND=gpu (Vulkan / Adreno 750).
-BACKEND="${LLM_BACKEND:-aarch64}"
+BACKEND="${LLM_BACKEND:-aarch64-simd}"
 
 cmake -S "$ROOT/c" -B "$BUILD_DIR" \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \

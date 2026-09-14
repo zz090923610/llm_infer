@@ -1,7 +1,7 @@
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
   message(FATAL_ERROR
-          "LLM_BACKEND=x86_64 requires an x86_64 host (got ${CMAKE_SYSTEM_PROCESSOR}). "
-          "Use -DLLM_BACKEND=cpu")
+          "LLM_BACKEND=x86_64-simd requires an x86_64 host (got ${CMAKE_SYSTEM_PROCESSOR}). "
+          "Use -DLLM_BACKEND=plain-cpu")
 endif()
 
 set(LLM_BACKEND_COMPILE_OPTIONS -mavx2 -mfma PARENT_SCOPE)

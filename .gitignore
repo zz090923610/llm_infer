@@ -74,7 +74,7 @@ c/tests/test_linear
 c/tests/test_prompt
 
 # glslang SPIR-V blobs from shaders/compile.sh (shaders_spv.h is the committed embed)
-c/backends/gpu/shaders/*.spv
+c/backends/host/android/gpu/shaders/*.spv
 
 # Third-party clones (llama.cpp is its own git repo)
 /3rd/
