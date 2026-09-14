@@ -2,6 +2,10 @@
 #include "gguf.h"
 #include <string.h>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 float fp16_to_fp32(uint16_t h) {
     uint32_t sign = (uint32_t)(h >> 15) & 1u;
     uint32_t exp = (uint32_t)(h >> 10) & 0x1fu;
@@ -93,6 +97,30 @@ int dequantize_q8_0(const void *data, int n_elements, float *out) {
     if (n_elements % QK8_0 != 0) return -1;
     int n_blocks = n_elements / QK8_0;
     const unsigned char *raw = (const unsigned char *)data;
+#if defined(__aarch64__)
+    for (int b = 0; b < n_blocks; b++) {
+        const unsigned char *blk = raw + (size_t)b * BLOCK_Q8_0;
+        float16_t h;
+        memcpy(&h, blk, 2);
+        float32x4_t vs = vcvt_f32_f16(vdup_n_f16(h));
+        const int8_t *qs = (const int8_t *)(blk + 2);
+        float *dst = out + (size_t)b * QK8_0;
+        int8x16_t q0 = vld1q_s8(qs);
+        int8x16_t q1 = vld1q_s8(qs + 16);
+        int16x8_t s0 = vmovl_s8(vget_low_s8(q0));
+        int16x8_t s1 = vmovl_s8(vget_high_s8(q0));
+        int16x8_t s2 = vmovl_s8(vget_low_s8(q1));
+        int16x8_t s3 = vmovl_s8(vget_high_s8(q1));
+        vst1q_f32(dst + 0, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s0)))));
+        vst1q_f32(dst + 4, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s0)))));
+        vst1q_f32(dst + 8, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s1)))));
+        vst1q_f32(dst + 12, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s1)))));
+        vst1q_f32(dst + 16, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s2)))));
+        vst1q_f32(dst + 20, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s2)))));
+        vst1q_f32(dst + 24, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s3)))));
+        vst1q_f32(dst + 28, vmulq_f32(vs, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s3)))));
+    }
+#else
     for (int b = 0; b < n_blocks; b++) {
         const unsigned char *blk = raw + (size_t)b * BLOCK_Q8_0;
         uint16_t hs;
@@ -102,6 +130,7 @@ int dequantize_q8_0(const void *data, int n_elements, float *out) {
         float *dst = out + (size_t)b * QK8_0;
         for (int i = 0; i < QK8_0; i++) dst[i] = (float)qs[i] * scale;
     }
+#endif
     return 0;
 }
 

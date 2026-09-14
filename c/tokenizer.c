@@ -366,6 +366,10 @@ char *apply_chat_template(const Tokenizer *tok, const ChatMessage *msgs, int n, 
             sys = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n";
         } else if (arch == LLM_ARCH_QWEN35 && tok && str_has_ci(tok->hparams.model_name, "Qwen")) {
             sys = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud.<|im_end|>\n";
+        } else if (tok && tok->hparams.chat_template && strstr(tok->hparams.chat_template, "SmolLM")) {
+            /* Official HuggingFaceTB SmolLM2 jinja injects this when no system
+               message is given. */
+            sys = "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n";
         }
         if (sys) bytevec_append(&v, sys, (int)strlen(sys));
     }
@@ -444,7 +448,96 @@ static int is_special_tok(const char *tok, int ttype) {
     return n >= 4 && tok[0] == '<' && tok[1] == '|' && tok[n - 2] == '|' && tok[n - 1] == '>';
 }
 
+static int merge_pair_cmp(const void *a, const void *b) {
+    uint64_t ka = ((const MergePair *)a)->key;
+    uint64_t kb = ((const MergePair *)b)->key;
+    return (ka > kb) - (ka < kb);
+}
+
+enum { LLM_TOK_TABLE_MAGIC = 0x504D4C4Cu, LLM_TOK_TABLE_VERSION = 1 };
+
+static void load_merge_table(Tokenizer *t, const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) die("cannot open --tok-tables %s", path);
+    if (fseek(fp, 0, SEEK_END) != 0) die("fseek --tok-tables %s", path);
+    long sz = ftell(fp);
+    if (sz < 16) die("truncated --tok-tables %s", path);
+    if (fseek(fp, 0, SEEK_SET) != 0) die("fseek --tok-tables %s", path);
+    uint8_t *buf = xmalloc((size_t)sz);
+    if (fread(buf, 1, (size_t)sz, fp) != (size_t)sz) die("read --tok-tables %s", path);
+    fclose(fp);
+
+    uint32_t magic, ver, n_vocab, n_pairs;
+    memcpy(&magic, buf, 4);
+    memcpy(&ver, buf + 4, 4);
+    memcpy(&n_vocab, buf + 8, 4);
+    memcpy(&n_pairs, buf + 12, 4);
+    if (magic != LLM_TOK_TABLE_MAGIC) die("bad --tok-tables magic in %s", path);
+    if (ver != LLM_TOK_TABLE_VERSION) die("unsupported --tok-tables version %u", ver);
+    if ((int)n_vocab != t->n_vocab) {
+        die("--tok-tables n_vocab=%u != model vocab %d", n_vocab, t->n_vocab);
+    }
+    size_t need = 16u + (size_t)n_pairs * 12u;
+    if ((size_t)sz < need) die("truncated --tok-tables pairs in %s", path);
+
+    t->merge_pairs = xmalloc((size_t)n_pairs * sizeof(MergePair));
+    const uint8_t *p = buf + 16;
+    for (uint32_t i = 0; i < n_pairs; i++) {
+        uint64_t key;
+        int32_t rank;
+        memcpy(&key, p, 8);
+        memcpy(&rank, p + 8, 4);
+        p += 12;
+        t->merge_pairs[i].key = key;
+        t->merge_pairs[i].rank = (int)rank;
+    }
+    t->n_merge_pairs = (int)n_pairs;
+    free(buf);
+    LLM_STEP("tokenizer loaded %d merge pairs from %s\n", t->n_merge_pairs, path);
+}
+
+static void index_merges_from_gguf(Tokenizer *t, const GGUFValue *merges) {
+    t->merge_pairs = xmalloc((size_t)merges->v.arr.n * sizeof(MergePair));
+    t->n_merge_pairs = 0;
+    LLM_STEP("tokenizer index merges as id pairs (slow in-guest path)\n");
+    char **ms = (char **)merges->v.arr.data;
+    int n_merge_skip = 0;
+    for (int i = 0; i < merges->v.arr.n; i++) {
+        char *sp = strchr(ms[i], ' ');
+        if (!sp || sp == ms[i] || !sp[1]) {
+            n_merge_skip++;
+            continue;
+        }
+        char saved = *sp;
+        *sp = 0;
+        int lid = -1, rid = -1;
+        int got_l = strmap_get(&t->token_to_id, ms[i], &lid);
+        *sp = saved;
+        int got_r = strmap_get(&t->token_to_id, sp + 1, &rid);
+        if (!got_l || !got_r) {
+            n_merge_skip++;
+            continue;
+        }
+        t->merge_pairs[t->n_merge_pairs].key =
+            ((uint64_t)(uint32_t)lid << 32) | (uint32_t)rid;
+        t->merge_pairs[t->n_merge_pairs].rank = i;
+        t->n_merge_pairs++;
+        if ((i + 1) % 1024 == 0 || i + 1 == merges->v.arr.n) {
+            LLM_STEP("tokenizer merges %d/%d (ok=%d)\n", i + 1, merges->v.arr.n,
+                     t->n_merge_pairs);
+        }
+    }
+    LLM_STEP("tokenizer qsort %d merge pairs\n", t->n_merge_pairs);
+    qsort(t->merge_pairs, (size_t)t->n_merge_pairs, sizeof(MergePair), merge_pair_cmp);
+    LLM_STEP("tokenizer merges done ok=%d skip=%d\n", t->n_merge_pairs, n_merge_skip);
+}
+
 Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
+    return tokenizer_from_gguf_ex(gguf, hp, NULL);
+}
+
+Tokenizer *tokenizer_from_gguf_ex(const GGUFFile *gguf, const LlamaHParams *hp,
+                                  const char *merge_table_path) {
     init_byte_tables();
     const GGUFValue *model = gguf_get(gguf, "tokenizer.ggml.model");
     if (!model || model->type != GGUF_STR || strcmp(model->v.s, "gpt2") != 0) {
@@ -454,7 +547,10 @@ Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
     const GGUFValue *merges = gguf_get(gguf, "tokenizer.ggml.merges");
     const GGUFValue *types = gguf_get(gguf, "tokenizer.ggml.token_type");
     if (!toks || toks->type != GGUF_ARR || toks->v.arr.type != GGUF_STR) die("missing tokenizer tokens");
-    if (!merges || merges->type != GGUF_ARR || merges->v.arr.type != GGUF_STR) die("missing tokenizer merges");
+    int have_tables = merge_table_path && merge_table_path[0];
+    if (!have_tables && (!merges || merges->type != GGUF_ARR || merges->v.arr.type != GGUF_STR)) {
+        die("missing tokenizer merges");
+    }
 
     Tokenizer *t = xcalloc(1, sizeof(Tokenizer));
     if (hp) {
@@ -467,16 +563,23 @@ Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
     }
     t->n_vocab = toks->v.arr.n;
     t->vocab = xcalloc((size_t)t->n_vocab, sizeof(char *));
-    hashmap_init(&t->token_to_id);
+    strmap_init(&t->token_to_id, t->n_vocab);
+    LLM_STEP("tokenizer copy vocab n=%d buckets=%d\n", t->n_vocab, t->token_to_id.nbuckets);
     char **ss = (char **)toks->v.arr.data;
     for (int i = 0; i < t->n_vocab; i++) {
         t->vocab[i] = xstrdup(ss[i]);
-        hashmap_put(&t->token_to_id, t->vocab[i], i);
+        strmap_put(&t->token_to_id, t->vocab[i], i);
+        if ((i + 1) % 4096 == 0 || i + 1 == t->n_vocab) {
+            LLM_STEP("tokenizer vocab %d/%d\n", i + 1, t->n_vocab);
+        }
     }
+    LLM_STEP("tokenizer vocab done\n");
 
-    hashmap_init(&t->merges_rank);
-    char **ms = (char **)merges->v.arr.data;
-    for (int i = 0; i < merges->v.arr.n; i++) hashmap_put(&t->merges_rank, ms[i], i);
+    if (have_tables) {
+        load_merge_table(t, merge_table_path);
+    } else {
+        index_merges_from_gguf(t, merges);
+    }
 
     SpecRef *refs = xmalloc((size_t)t->n_vocab * sizeof(SpecRef));
     int ns = 0;
@@ -498,6 +601,7 @@ Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
         hashmap_put(&t->special_set, t->specials[i], 1);
     }
     free(refs);
+    LLM_STEP("tokenizer specials n=%d\n", t->n_specials);
 
     IntVec stops;
     intvec_init(&stops);
@@ -506,8 +610,8 @@ Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp) {
     /* SmolLM2 uses literal END as EOS. Do not treat those pieces as stops on
        Qwen — they are ordinary BPE tokens and would truncate replies. */
     if (t->hparams.arch == LLM_ARCH_LLAMA) {
-        if (hashmap_get(&t->token_to_id, "END", &tid)) intvec_push(&stops, tid);
-        if (hashmap_get(&t->token_to_id, "ĠEND", &tid)) intvec_push(&stops, tid);
+        if (strmap_get(&t->token_to_id, "END", &tid)) intvec_push(&stops, tid);
+        if (strmap_get(&t->token_to_id, "ĠEND", &tid)) intvec_push(&stops, tid);
     }
     t->n_stop = stops.n;
     t->stop_ids = stops.data;
@@ -528,8 +632,8 @@ void tokenizer_free(Tokenizer *t) {
     if (!t) return;
     for (int i = 0; i < t->n_vocab; i++) free(t->vocab[i]);
     free(t->vocab);
-    hashmap_free(&t->token_to_id);
-    hashmap_free(&t->merges_rank);
+    strmap_free(&t->token_to_id);
+    free(t->merge_pairs);
     for (int i = 0; i < t->n_specials; i++) free(t->specials[i]);
     free(t->specials);
     hashmap_free(&t->special_set);
@@ -625,19 +729,22 @@ static void partition(Tokenizer *t, const char *text, int parse_special, Frag **
 }
 
 static int merge_rank(Tokenizer *t, const char *left, const char *right, int *rank) {
-    size_t ll = strlen(left), lr = strlen(right);
-    char *key = xmalloc(ll + lr + 2);
-    memcpy(key, left, ll);
-    key[ll] = ' ';
-    memcpy(key + ll + 1, right, lr + 1);
-    int found = hashmap_get(&t->merges_rank, key, rank);
-    free(key);
-    return found;
+    int lid, rid;
+    if (!strmap_get(&t->token_to_id, left, &lid)) return 0;
+    if (!strmap_get(&t->token_to_id, right, &rid)) return 0;
+    MergePair key;
+    key.key = ((uint64_t)(uint32_t)lid << 32) | (uint32_t)rid;
+    key.rank = 0;
+    const MergePair *hit =
+        bsearch(&key, t->merge_pairs, (size_t)t->n_merge_pairs, sizeof(MergePair), merge_pair_cmp);
+    if (!hit) return 0;
+    if (rank) *rank = hit->rank;
+    return 1;
 }
 
 static void bpe(Tokenizer *t, const char *token, IntVec *ids) {
     int tid;
-    if (hashmap_get(&t->token_to_id, token, &tid)) {
+    if (strmap_get(&t->token_to_id, token, &tid)) {
         intvec_push(ids, tid);
         return;
     }
@@ -651,7 +758,7 @@ static void bpe(Tokenizer *t, const char *token, IntVec *ids) {
         char tmp[8];
         int n = utf8_encode(cps[0], tmp);
         tmp[n] = 0;
-        if (hashmap_get(&t->token_to_id, tmp, &tid)) intvec_push(ids, tid);
+        if (strmap_get(&t->token_to_id, tmp, &tid)) intvec_push(ids, tid);
         free(cps);
         return;
     }
@@ -710,7 +817,7 @@ static void bpe(Tokenizer *t, const char *token, IntVec *ids) {
     int i = 0;
     while (i != -1) {
         if (alive[i]) {
-            if (hashmap_get(&t->token_to_id, word[i], &tid)) {
+            if (strmap_get(&t->token_to_id, word[i], &tid)) {
                 intvec_push(ids, tid);
             } else {
                 int npc = 0;
@@ -719,7 +826,7 @@ static void bpe(Tokenizer *t, const char *token, IntVec *ids) {
                     char tmp[8];
                     int n = utf8_encode(pc[k], tmp);
                     tmp[n] = 0;
-                    if (hashmap_get(&t->token_to_id, tmp, &tid)) intvec_push(ids, tid);
+                    if (strmap_get(&t->token_to_id, tmp, &tid)) intvec_push(ids, tid);
                 }
                 free(pc);
             }
@@ -769,7 +876,7 @@ int tokenizer_encode(Tokenizer *t, const char *text, int parse_special, IntVec *
     for (int i = 0; i < nf; i++) {
         if (frags[i].special) {
             int tid;
-            if (!hashmap_get(&t->token_to_id, frags[i].s, &tid)) die("unknown special %s", frags[i].s);
+            if (!strmap_get(&t->token_to_id, frags[i].s, &tid)) die("unknown special %s", frags[i].s);
             intvec_push(out, tid);
         } else {
             encode_text(t, frags[i].s, out);

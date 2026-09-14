@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="$ROOT/c/build-android"
-MODEL="$ROOT/nanogpt-chat-q8_0.gguf"
+MODEL="$ROOT/models/smollm2-360m-instruct-q8_0.gguf"
 REMOTE="/sdcard/Download/llm_infer"
 # Same directory as $REMOTE, but on the f2fs pass-through. /sdcard is FUSE+noexec,
 # so ./chat and linker64 both fail there (Permission denied / map segment EPERM).

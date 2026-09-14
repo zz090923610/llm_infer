@@ -25,6 +25,8 @@ void generate_state_init(GenerateState *st, LlamaModel *model, Tokenizer *tok, K
     st->top_k = top_k;
     st->top_p = top_p;
     rng_seed(&st->rng, seed ? seed : ((uint64_t)time(NULL) ^ 0xA5A5A5A5ULL));
+    LLM_STEP("generate_state_init cache=%s max_tokens=%d\n",
+             st->own_cache ? "owned" : "shared", st->max_tokens);
 }
 
 void generate_state_free(GenerateState *st) {
@@ -60,7 +62,9 @@ char *generate_text(LlamaModel *model, Tokenizer *tok, const char *prompt, int m
                     KVCache *cache, uint64_t seed) {
     IntVec ids;
     intvec_init(&ids);
+    LLM_STEP("encode prompt\n");
     tokenizer_encode(tok, prompt, parse_special, &ids);
+    LLM_STEP("encoded %d prompt tokens, init generate state\n", ids.n);
     GenerateState st;
     generate_state_init(&st, model, tok, cache, max_tokens, temperature, top_k, top_p, seed);
     StreamDecoder dec;
@@ -68,11 +72,14 @@ char *generate_text(LlamaModel *model, Tokenizer *tok, const char *prompt, int m
     ByteVec pieces;
     bytevec_init(&pieces);
     double t0 = monotonic_now();
+    LLM_STEP("prefill start n=%d\n", ids.n);
     generate_start(&st, ids.data, ids.n);
+    LLM_STEP("prefill done, decode up to %d tokens\n", max_tokens);
     int n = 0;
     int tid;
     while (generate_next(&st, &tid) == 0) {
         n++;
+        LLM_STEP("decoded token %d/%d id=%d\n", n, max_tokens, tid);
         char *chunk = stream_decoder_push(&dec, tid);
         bytevec_append(&pieces, chunk, (int)strlen(chunk));
         if (stream && chunk[0]) {

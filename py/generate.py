@@ -137,7 +137,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Run a completion or a tiny batched demo")
-    parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "nanogpt-chat-q8_0.gguf"))
+    parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "models" / "smollm2-360m-instruct-q8_0.gguf"))
     parser.add_argument("--prompt", default="Hello")
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--temp", type=float, default=0.8)
@@ -154,8 +154,8 @@ def main() -> None:
     tok = Tokenizer.from_gguf(loaded.gguf, loaded.hparams)
     if args.batch_demo:
         prompts = [
-            apply_chat_template([{"role": "user", "content": "Say hi in one word."}]),
-            apply_chat_template([{"role": "user", "content": "2+2="}]),
+            apply_chat_template([{"role": "user", "content": "Say hi in one word."}], tokenizer=tok),
+            apply_chat_template([{"role": "user", "content": "2+2="}], tokenizer=tok),
         ]
         print("batched greedy decode:", flush=True)
         outs = generate_batch(model, tok, prompts, max_tokens=args.max_tokens, temperature=0.0)
@@ -163,7 +163,7 @@ def main() -> None:
             print("---")
             print(tok.decode(ids, skip_special=True))
         return
-    text = apply_chat_template([{"role": "user", "content": args.prompt}])
+    text = apply_chat_template([{"role": "user", "content": args.prompt}], tokenizer=tok)
     generate_text(model, tok, text, args.max_tokens, args.temp, args.top_k, args.top_p)
 
 

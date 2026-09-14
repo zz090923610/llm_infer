@@ -11,10 +11,16 @@ typedef struct {
 } ChatMessage;
 
 typedef struct {
+    uint64_t key;
+    int rank;
+} MergePair;
+
+typedef struct {
     char **vocab;
     int n_vocab;
-    HashMap token_to_id;
-    HashMap merges_rank;
+    StrMap token_to_id;
+    MergePair *merge_pairs;
+    int n_merge_pairs;
     char **specials;
     int n_specials;
     HashMap special_set;
@@ -33,6 +39,8 @@ typedef struct {
 char *apply_chat_template(const Tokenizer *tok, const ChatMessage *msgs, int n, int add_generation_prompt);
 
 Tokenizer *tokenizer_from_gguf(const GGUFFile *gguf, const LlamaHParams *hp);
+Tokenizer *tokenizer_from_gguf_ex(const GGUFFile *gguf, const LlamaHParams *hp,
+                                  const char *merge_table_path);
 Tokenizer *tokenizer_from_file(const char *path);
 void tokenizer_free(Tokenizer *t);
 

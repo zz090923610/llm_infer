@@ -1,4 +1,5 @@
-# Model weights (local GGUF / checkpoints; do not commit)
+# Model weights (local GGUF / checkpoints; do not commit).
+# Checkpoints live in models/; the files themselves stay gitignored.
 *.gguf
 *.ggml
 *.safetensors
@@ -57,7 +58,8 @@ build.ninja
 *.d
 *.dSYM/
 
-# Out-of-tree CMake dirs: c/build, c/build-android, c/build-android-gpu, c/build-x86, ...
+# Host CMake tree is the top-level ./build (see README.md).
+/build/
 c/build/
 c/build-*/
 c/cmake-build-*/
@@ -66,9 +68,10 @@ cmake-build-*/
 # Built binaries (if generated outside build/)
 c/chat
 c/generate
-c/test_quant
-c/test_tokenizer
-c/test_linear
+c/tests/test_quant
+c/tests/test_tokenizer
+c/tests/test_linear
+c/tests/test_prompt
 
 # glslang SPIR-V blobs from shaders/compile.sh (shaders_spv.h is the committed embed)
 c/backends/gpu/shaders/*.spv

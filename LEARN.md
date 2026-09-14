@@ -12,6 +12,8 @@ load GGUF → dequant Q8_0 to f32 → tokenize (GPT-2 BPE + ChatML)
 
 You already know OS, Linux, and C. You are new to LLMs. Each step has two layers: **just enough model theory**, then **this repo’s code**. Python under `py/` is optional side-by-side reading (same architecture, easier math). The primary path is C.
 
+Host build/run (CPU, AVX, PIM without gem5): [README.md](README.md).
+
 **How to use this file with the chat**
 
 - Read one step at a time. Stay there until it feels easy.
@@ -19,11 +21,11 @@ You already know OS, Linux, and C. You are new to LLMs. Each step has two layers
 - Do not skip ahead to implementations before the mental model in Step 1 is solid.
 - No code changes unless you ask for an experiment (print shapes, dump tokens, etc.).
 
-**This checkpoint (measured from `nanogpt-chat-q8_0.gguf`)**
+**This checkpoint (measured from official `smollm2-360m-instruct-q8_0.gguf`)**
 
 | Field | Value | Meaning |
 | --- | ---: | --- |
-| Name | SmolLM2 360M Instruct | `general.name` |
+| Name | SmolLM2-360M-Instruct | HuggingFaceTB official GGUF (`general.name` is the training run) |
 | Architecture | `llama` | Required by `hparams_from_kv` |
 | `n_layer` | 32 | Transformer blocks |
 | `n_embd` (D) | 960 | Residual stream width |
@@ -31,7 +33,7 @@ You already know OS, Linux, and C. You are new to LLMs. Each step has two layers
 | `n_head_kv` (KV) | 5 | Key/value heads (GQA, 3 query heads per KV head) |
 | `head_dim` (d) | 64 | Per-head width (`960 / 15`) |
 | `n_ff` (F) | 2560 | SwiGLU hidden size |
-| `n_vocab` | 49153 | Logit / embed rows |
+| `n_vocab` | 49152 | Logit / embed rows (tied `token_embd`) |
 | `n_ctx` | 8192 | Max positions |
 | `rms_eps` | 1e-5 | RMSNorm epsilon |
 | `rope_theta` | 1e5 | RoPE base |
@@ -39,21 +41,21 @@ You already know OS, Linux, and C. You are new to LLMs. Each step has two layers
 | On disk | ~369 MB Q8_0 | 290 tensors |
 | In RAM after load | ~1.35 GiB f32 | Then the mmap is dropped |
 
-Host binaries (already built): `c/build/generate`, `c/build/chat`.
+Build and run (see [README.md](README.md)): `cmake -B build && cmake --build build -j`. Default `all` suffixes binaries (`generate-cpu`, `chat-pim`, …). `-DLLM_BACKEND=cpu` keeps unsuffixed `generate` / `chat`.
 
 ```
-./c/build/generate --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-cpu --prompt "Hello" --temp 0 --max-tokens 16
 ```
 
 ```
-loading .../nanogpt-chat-q8_0.gguf
-  dequant to f32 (~1.35 GiB)
-  dequant 290/290 tensors
-Hello! How can I assist you today? 😊
-[11 tokens, 2.71 tok/s]
+loading .../models/smollm2-360m-instruct-q8_0.gguf
+  mmap quantized weights (~0.36 GiB packed, f32 would be ~1.35 GiB)
+  load 290/290 tensors
+Hello, I'm here to assist you with any language-related questions or problems
+[16 tokens, 34 tok/s]
 ```
 
-`c/build/test_quant` and `c/build/test_tokenizer` both pass.
+`build/test_quant-cpu` and `build/test_tokenizer-cpu` both pass (`ctest --test-dir build`).
 
 ```mermaid
 flowchart TD
@@ -136,17 +138,23 @@ Skim [`py/README.md`](py/README.md) for the same module table on the Python side
 
 ```bash
 # greedy one-shot (deterministic)
-./c/build/generate --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-cpu --prompt "Hello" --temp 0 --max-tokens 16
+
+# AVX2, or PIM in-process Device (no gem5)
+./build/generate-x86_64 --prompt "Hello" --temp 0 --max-tokens 16
+./build/generate-pim --prompt "Hello" --temp 0 --max-tokens 16
 
 # sampled (default temp 0.8, top_p 0.9)
-./c/build/generate --prompt "Hello" --max-tokens 32
+./build/generate-cpu --prompt "Hello" --max-tokens 32
 
 # two prompts in one padded batch
-./c/build/generate --batch-demo --max-tokens 16
+./build/generate-cpu --batch-demo --max-tokens 16
 
 # interactive (empty line or /exit to quit, /reset to clear history)
-./c/build/chat --temp 0 --max-tokens 64
+./build/chat-cpu --temp 0 --max-tokens 64
 ```
+
+PIM desktop runs use `PIM_ISSUE=host` (the default). Do not set `mmio`/`shm` unless you are on the gem5/hybrid path. Full usage: [README.md](README.md).
 
 ### 1.6 Checkpoint
 
@@ -193,7 +201,7 @@ Default path: wrap `--prompt` as one user ChatML message, call `generate_text(..
 
 `--batch-demo`: two ChatML prompts (`"Say hi in one word."`, `"2+2="`), `generate_batch` with `temp=0`.
 
-Host builds bake `LLM_DEFAULT_MODEL` to the repo GGUF. Android builds do not (Step 6).
+Host builds bake `LLM_DEFAULT_MODEL` to `models/smollm2-360m-instruct-q8_0.gguf`. Android builds do not (Step 6).
 
 ### 2.3 `generate.h` / `generate.c`
 
@@ -287,7 +295,7 @@ The stop token is **not** appended to the output ID list.
 
 ### 3.1 Theory (tied to this checkpoint)
 
-**Embedding table** `token_embd.weight` is `(n_vocab, D) = (49153, 960)`. Token ID `t` copies row `t` into the residual stream `x`.
+**Embedding table** `token_embd.weight` is `(n_vocab, D) = (49152, 960)`. Token ID `t` copies row `t` into the residual stream `x`.
 
 **Residual stream:** a `D`-vector per token that every layer reads and writes with `x += attn(...)` and `x += ffn(...)`.
 
@@ -473,7 +481,7 @@ cache.n_seq[b] = key_len[b]
 
 ### 3.8 Why last-token logits only
 
-Sampling only needs P(next \| prefix). A full `(B, S, vocab)` projection would be a 49153×960×S matmul for no benefit. Training wants every position; inference does not.
+Sampling only needs P(next \| prefix). A full `(B, S, vocab)` projection would be a 49152×960×S matmul for no benefit. Training wants every position; inference does not.
 
 ### 3.9 What breaks if you…
 
@@ -566,7 +574,7 @@ This engine **dequantizes every tensor to f32 at load**, then `munmap`s the file
 
 `fp16_to_fp32` is a bit-level IEEE conversion (subnormals, inf/NaN, bias 15 → 127).
 
-`test_quant.c` first case (do this on paper):
+`c/tests/test_quant.c` first case (do this on paper):
 
 - scale = 0.5 (`fp16 0x3800`)
 - `qs[i] = i - 16` for `i = 0..31`
@@ -579,7 +587,7 @@ Second case: two blocks, scale 1.0 with qs=1 → all 1.0; scale 2.0 with qs=3 �
 Ragged `n_elements % 32 != 0` is rejected.
 
 ```bash
-./c/build/test_quant
+./build/test_quant-cpu
 ```
 
 ### 4.5 Name map onto `LayerWeights`
@@ -647,10 +655,10 @@ A token is **special** if its type is unknown/control/user-defined, or it matche
 | 1 | One ID (correct for ChatML) |
 | 0 | Ordinary BPE of those characters (roundtrip-safe, ChatML-wrong) |
 
-`test_tokenizer.c`: encode `"Hello, world! 123 cats."` with `parse_special=0`, decode must equal input. Then ChatML `"Hi"` with `parse_special=1`: first ID is `<|im_start|>`, and `<|im_end|>` appears. Also checks `stop_ids` contains `eos`, `"END"`, `"ĠEND"`.
+`c/tests/test_tokenizer.c`: encode `"Hello, world! 123 cats."` with `parse_special=0`, decode must equal input. Then ChatML `"Hi"` with `parse_special=1`: first ID is `<|im_start|>`, and `<|im_end|>` appears. Also checks `stop_ids` contains `eos`, `"END"`, `"ĠEND"`.
 
 ```bash
-./c/build/test_tokenizer
+./build/test_tokenizer-cpu
 ```
 
 ### 5.4 Pretok and Unicode
@@ -728,21 +736,29 @@ No hidden framework. If you see `intvec_push` in generate/chat/tokenizer, this i
 
 ### 6.2 CMake ([`c/CMakeLists.txt`](c/CMakeLists.txt))
 
-**In `lib llm`:**
+**In each `lib llm_<backend>` (or unsuffixed `llm` if one backend):**
 
 Core: `util.c`, `hashmap.c`, `heap.c`, `quant.c`, `gguf.c`, `unicode.c`, `unicode_data.c`, `tokenizer.c`, `cache.c`, `model.c`, `sampler.c`, `generate.c`
 
-CPU backend (`c/backends/cpu/`, `-DLLM_BACKEND=cpu`): `backend.c`, `tensor.c`, `rope.c`, `attn.c`
+| `-DLLM_BACKEND` | Extra sources | Notes |
+| --- | --- | --- |
+| `cpu` | `c/backends/cpu/{backend,tensor,rope,attn}.c` | Scalar reference |
+| `x86_64` | `c/backends/x86_64/*` | AVX2/FMA + pool |
+| `pim` | `c/backends/pim/*` + `pim_func` | Decode GEMV on Device; host default `PIM_ISSUE=host` |
+| `all` | every available | Suffixed bins: `generate-cpu`, `test_linear-pim`, … |
 
 **Not in the library:**
 
-- `chat.c` → binary `chat`
-- `generate_main.c` → binary `generate`
-- `test_quant.c` / `test_tokenizer.c` → host tests only
+- `chat.c` → `chat` or `chat-<be>`
+- `generate_main.c` → `generate` or `generate-<be>`
+- `c/tests/test_quant.c` / `c/tests/test_tokenizer.c` / `c/tests/test_linear.c` / `c/tests/test_prompt.c` → host tests
+- PIM also builds `test_planner` and `pim_hybrid_stub` (stub is for gem5 hybrid only)
 
-Host (not cross, not Android): `#define LLM_DEFAULT_MODEL` to `${REPO}/nanogpt-chat-q8_0.gguf`.
+Host (not cross, not Android): `#define LLM_DEFAULT_MODEL` to `${REPO}/models/smollm2-360m-instruct-q8_0.gguf`.
 
 Cross/Android: no default model, no CTest targets. You must pass `--model`.
+
+Native PIM does not need gem5. `PIM_ISSUE=mmio` and `shm` are gem5/hybrid only; see [README.md](README.md).
 
 ### 6.3 Android
 
@@ -759,7 +775,7 @@ Cross/Android: no default model, no CTest targets. You must pass `--model`.
 - Run via the dynamic linker:
 
 ```bash
-/system/bin/linker64 ./generate --model ./nanogpt-chat-q8_0.gguf --prompt Hello --temp 0 --max-tokens 32
+/system/bin/linker64 ./generate --model ./smollm2-360m-instruct-q8_0.gguf --prompt Hello --temp 0 --max-tokens 32
 ```
 
 `--run` does a 16-token greedy smoke test over adb.
@@ -781,16 +797,21 @@ The process still needs ~1.35 GiB free RAM for f32 weights, plus the KV cache.
 | `c/include/tensor.h` + `c/backends/cpu/tensor.c` | linear, RMSNorm, SiLU, softmax |
 | `c/include/rope.h` + `c/backends/cpu/rope.c` | Consecutive-pair RoPE |
 | `c/include/attn.h` + `c/backends/cpu/attn.c` | GQA attention, head pack/merge, KV store |
+| `c/backends/x86_64/` | AVX2 linear/attn/RoPE + pthread pool |
+| `c/backends/pim/` | GEMV planner + intern; host Device or gem5 issue |
 | `c/include/cache.h` + `c/cache.c` | K/V arena + `n_seq` |
 | `c/include/model.h` + `c/model.c` | Llama forward (calls backend kernels) |
 | `c/include/sampler.h` + `c/sampler.c` | Greedy / temp / top-k / top-p |
 | `c/include/generate.h` + `c/generate.c` | Prefill/decode loop |
 | `c/generate_main.c` | One-shot CLI |
 | `c/chat.c` | Multi-turn + prefix cache |
-| `c/test_quant.c` | Q8_0 block tests |
-| `c/test_tokenizer.c` | Roundtrip + ChatML specials |
-| `c/CMakeLists.txt` | lib + bins + host tests; `-DLLM_BACKEND` |
+| `c/tests/test_quant.c` | Q8_0 block tests |
+| `c/tests/test_tokenizer.c` | Roundtrip + ChatML specials |
+| `c/tests/test_linear.c` | Kernel golden vs scalar ref |
+| `c/tests/test_prompt.c` | Prompt-level golden + linear dump |
+| `c/CMakeLists.txt` | lib + bins + host tests; `-DLLM_BACKEND` (`all` / `cpu` / `x86_64` / `pim` / …) |
 | `c/backends/cpu/CMakeLists.txt` | Scalar CPU kernel sources |
+| `README.md` | Host usage, `PIM_ISSUE`, tests (no gem5) |
 | `c/scripts/build-android.sh` | NDK cross-compile |
 | `c/scripts/adb-push.sh` | adb deploy + linker64 hint |
 | `py/*.py` | NumPy reference (optional) |

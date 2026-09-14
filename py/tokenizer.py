@@ -125,9 +125,16 @@ def pretokenize_smollm(text: str) -> list[str]:
     return words
 
 
-def apply_chat_template(messages: list[dict[str, str]], add_generation_prompt: bool = True) -> str:
+def apply_chat_template(messages: list[dict[str, str]], add_generation_prompt: bool = True,
+                        tokenizer: Tokenizer | None = None) -> str:
     """ChatML, matching tokenizer.chat_template in the GGUF. No extra BOS."""
     parts: list[str] = []
+    tmpl = tokenizer.hparams.chat_template if tokenizer is not None else "SmolLM"
+    has_system = bool(messages) and messages[0].get("role") == "system"
+    if not has_system and tmpl and "SmolLM" in tmpl:
+        parts.append(
+            "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n"
+        )
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
@@ -150,7 +157,7 @@ class Tokenizer:
     def stop_ids(self) -> set[int]:
         """EOS plus this checkpoint's trained end marker (`END` / ` END`).
 
-        NanoGPT-Chat often emits the word END instead of `<|im_end|>`, then
+        SmolLM2 (llama) often emits the word END instead of `<|im_end|>`, then
         loops on it until max_tokens. Treat those pieces as stop tokens.
         """
         ids = {self.hparams.eos_id}

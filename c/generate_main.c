@@ -5,18 +5,22 @@
 #include "util.h"
 
 #ifndef LLM_DEFAULT_MODEL
-#define LLM_DEFAULT_MODEL "../nanogpt-chat-q8_0.gguf"
+#define LLM_DEFAULT_MODEL "models/smollm2-360m-instruct-q8_0.gguf"
 #endif
 
 static void usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--prompt TEXT] [--max-tokens N] [--temp F] [--top-p F] "
             "[--top-k N] [--seed N] [--threads N] [--prefill-threads N] [--decode-threads N] "
-            "[--batch-demo] [--ctx N] [--think]\n",
+            "[--batch-demo] [--ctx N] [--think] [--tok-tables PATH] [--quiet] [--steps]\n",
             argv0);
 }
 
 int main(int argc, char **argv) {
+    /* Unbuffered so load/token lines reach gem5 logs before SE exit. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     const char *model_path = LLM_DEFAULT_MODEL;
     const char *prompt = "Hello";
     int max_tokens = 64;
@@ -30,6 +34,7 @@ int main(int argc, char **argv) {
     uint64_t seed = 0;
     int ctx = 0;
     int enable_thinking = 0;
+    const char *tok_tables = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
@@ -45,6 +50,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--batch-demo") == 0) batch_demo = 1;
         else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--think") == 0) enable_thinking = 1;
+        else if (strcmp(argv[i], "--tok-tables") == 0 && i + 1 < argc) tok_tables = argv[++i];
+        else if (strcmp(argv[i], "--quiet") == 0) llm_set_quiet(1);
+        else if (strcmp(argv[i], "--steps") == 0) llm_set_quiet(0);
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -58,17 +66,27 @@ int main(int argc, char **argv) {
     if (n_prefill > 0) llm_backend_set_prefill_threads(n_prefill);
     if (n_decode > 0) llm_backend_set_decode_threads(n_decode);
 
-    printf("loading %s\n", model_path);
     {
+        const char *q = getenv("LLM_QUIET");
+        if (q && q[0] && q[0] != '0') llm_set_quiet(1);
+    }
+
+    if (llm_steps_enabled()) {
+        printf("loading %s\n", model_path);
         int np = llm_backend_n_prefill_threads();
         int nd = llm_backend_n_decode_threads();
         if (np == nd) printf("  backend %s, %d thread(s)\n", llm_backend_name(), np);
         else printf("  backend %s, %d prefill / %d decode thread(s)\n", llm_backend_name(), np, nd);
+        fflush(stdout);
     }
-    fflush(stdout);
-    LoadedModel *loaded = load_model(model_path, 1, 1);
+    LoadedModel *loaded = load_model(model_path, 1, llm_steps_enabled());
+    LLM_STEP("weights loaded, init model graph\n");
     LlamaModel *model = llama_model_init(loaded);
-    Tokenizer *tok = tokenizer_from_gguf(loaded->gguf, &loaded->hparams);
+    LLM_STEP("model init done layers=%d embd=%d vocab=%d\n",
+             model->hparams.n_layer, model->hparams.n_embd, model->hparams.n_vocab);
+    LLM_STEP("build tokenizer tables=%s\n", tok_tables ? tok_tables : "(in-guest)");
+    Tokenizer *tok = tokenizer_from_gguf_ex(loaded->gguf, &loaded->hparams, tok_tables);
+    LLM_STEP("tokenizer ready vocab=%d\n", tok->n_vocab);
     tok->hparams.enable_thinking = enable_thinking;
 
     if (batch_demo) {
@@ -92,10 +110,16 @@ int main(int argc, char **argv) {
         free(p1);
     } else {
         ChatMessage msg = {"user", (char *)prompt};
+        LLM_STEP("apply chat template\n");
         char *text = apply_chat_template(tok, &msg, 1, 1);
         KVCache *cache = NULL;
-        if (ctx > 0) cache = llama_model_new_cache(model, 1, ctx);
+        if (ctx > 0) {
+            LLM_STEP("alloc kv cache ctx=%d\n", ctx);
+            cache = llama_model_new_cache(model, 1, ctx);
+        }
+        LLM_STEP("generate_text max_tokens=%d\n", max_tokens);
         char *out = generate_text(model, tok, text, max_tokens, temp, top_k, top_p, 1, 1, cache, seed);
+        LLM_STEP("generate_text done\n");
         if (cache) kvcache_free(cache);
         free(out);
         free(text);

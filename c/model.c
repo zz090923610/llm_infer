@@ -119,6 +119,7 @@ static void ensure_scratch(LlamaModel *m, int B, int S, int max_k) {
     if (b < 1) b = 1;
     if (s < 1) s = 1;
     if (k < 1) k = 1;
+    LLM_STEP("alloc scratch B=%d S=%d K=%d embd=%d ff=%d\n", b, s, k, hp->n_embd, hp->n_ff);
     m->scratch_B = b;
     m->scratch_S = s;
     m->scratch_K = k;
@@ -193,6 +194,7 @@ static void ensure_scratch(LlamaModel *m, int B, int S, int max_k) {
 }
 
 LlamaModel *llama_model_init(LoadedModel *loaded) {
+    LLM_STEP("llama_model_init bind weights\n");
     LlamaModel *m = xcalloc(1, sizeof(LlamaModel));
     m->hparams = loaded->hparams;
     m->hparams.chat_template = NULL;
@@ -266,6 +268,7 @@ LlamaModel *llama_model_init(LoadedModel *loaded) {
         snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", i);
         L->down = must_weight(loaded, name);
     }
+    LLM_STEP("llama_model_init intern weights layers=%d\n", n_layer);
     intern_mat(m->tok_embd);
     if (m->output != m->tok_embd) intern_mat(m->output);
     intern_w(m->output_norm, (size_t)D * sizeof(float));
@@ -299,6 +302,7 @@ LlamaModel *llama_model_init(LoadedModel *loaded) {
             intern_w(L->k_norm, (size_t)d * sizeof(float));
         }
     }
+    LLM_STEP("llama_model_init done\n");
     return m;
 }
 
@@ -340,7 +344,9 @@ KVCache *llama_model_new_cache(LlamaModel *m, int batch, int max_seq) {
         max_seq = m->hparams.n_ctx;
         if (max_seq > LLM_DEFAULT_MAX_SEQ) max_seq = LLM_DEFAULT_MAX_SEQ;
     }
+    LLM_STEP("kvcache_create batch=%d max_seq=%d layers=%d\n", batch, max_seq, m->hparams.n_layer);
     KVCache *c = kvcache_create(&m->hparams, batch, max_seq);
+    LLM_STEP("kvcache_create done\n");
     size_t layer = kvcache_layer_stride(c) * sizeof(float);
     for (int i = 0; i < c->n_layer; i++) {
         llm_backend_intern_device(c->k + (size_t)i * kvcache_layer_stride(c), layer);
@@ -358,10 +364,13 @@ static void full_attn_layer(LlamaModel *m, LayerWeights *L, int B, int S, int D,
         if (m->key_len[b] > max_k) max_k = m->key_len[b];
     float eps = m->hparams.rms_eps;
 
+    LLM_STEP("attn q n_tok=%d n_out=%d n_in=%d\n", BS, L->wq_out, D);
     linear_rows_wt(L->wq, m->h, m->y, BS, L->wq_out, D);
     add_bias_rows(m->y, L->bq, BS, L->wq_out);
+    LLM_STEP("attn k\n");
     linear_rows_wt(L->wk, m->h, m->ffn_gate, BS, KV * d, D);
     add_bias_rows(m->ffn_gate, L->bk, BS, KV * d);
+    LLM_STEP("attn v\n");
     linear_rows_wt(L->wv, m->h, m->ffn_up, BS, KV * d, D);
     add_bias_rows(m->ffn_up, L->bv, BS, KV * d);
 
@@ -407,10 +416,12 @@ static void full_attn_layer(LlamaModel *m, LayerWeights *L, int B, int S, int D,
     apply_rope_any(m, m->k, B, KV, S, d);
     attn_cache_store(layer_k, layer_v, m->k, m->v, batch_stride, head_stride, m->valid_buf, m->starts,
                      B, S, KV, d);
+    LLM_STEP("attn scores\n");
     attn_gqa(m->y, m->attn, m->q, layer_k, layer_v, batch_stride, head_stride, m->positions,
              m->valid_buf, m->key_len, B, H, S, KV, d, max_k, scale);
     if (gated) sigmoid_mul(m->y, m->gate_buf, B * H * S * d);
     attn_merge_heads(m->y, m->h, B, S, H, d);
+    LLM_STEP("attn wo\n");
     linear_rows_add_wt(L->wo, m->h, m->x, BS, D, L->wo_in);
 }
 
@@ -421,6 +432,7 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
     float scale = 1.0f / sqrtf((float)d);
     int BS = B * S;
     int n_layer = hp->n_layer_fwd > 0 ? hp->n_layer_fwd : hp->n_layer;
+    LLM_STEP("forward B=%d S=%d layers=%d seq0=%d\n", B, S, n_layer, cache->n_seq[0]);
 
     int *vl_local = NULL;
     if (!valid_len) {
@@ -460,6 +472,7 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
         }
     }
     llm_backend_host_write(m->tok_ids);
+    LLM_STEP("forward embed BS=%d D=%d\n", BS, D);
     embed_gather_wt(m->tok_embd, m->tok_ids, m->x, BS, D);
 
     size_t layer_stride = kvcache_layer_stride(cache);
@@ -470,6 +483,7 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
 
     for (int li = 0; li < n_layer; li++) {
         LayerWeights *L = &m->layers[li];
+        LLM_STEP("forward layer %d/%d %s\n", li + 1, n_layer, L->is_gdn ? "gdn" : "attn");
         rmsnorm_rows(m->x, L->attn_norm, m->h, BS, D, hp->rms_eps);
 
         if (L->is_gdn) {
@@ -489,8 +503,10 @@ float *llama_model_forward(LlamaModel *m, const int *tokens, int B, int S, KVCac
         linear_rows_wt(L->up, m->h, m->ffn_up, BS, F, D);
         silu_mul(m->ffn_gate, m->ffn_up, m->ffn_gate, BS * F);
         linear_rows_add_wt(L->down, m->ffn_gate, m->x, BS, D, F);
+        LLM_STEP("forward layer %d/%d ffn done\n", li + 1, n_layer);
     }
 
+    LLM_STEP("forward logits n_vocab=%d\n", hp->n_vocab);
     rmsnorm_rows(m->x, m->output_norm, m->h, BS, D, hp->rms_eps);
     float *logits = logits_out ? logits_out : m->logits;
     for (int b = 0; b < B; b++) {

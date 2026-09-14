@@ -588,6 +588,108 @@ static void test_attn_gqa(void) {
     free(areff);
 }
 
+static int env_truthy(const char *name) {
+    const char *e = getenv(name);
+    return e && e[0] && strcmp(e, "0") != 0 && strcmp(e, "false") != 0 && strcmp(e, "no") != 0;
+}
+
+#ifndef LLM_GOLDEN_DIR
+#define LLM_GOLDEN_DIR ""
+#endif
+
+static int load_floats_block(FILE *f, float *dst, int n) {
+    int got = 0;
+    while (got < n) {
+        int c = fgetc(f);
+        if (c == EOF) return 0;
+        if (c == '#') {
+            while (c != EOF && c != '\n') c = fgetc(f);
+            continue;
+        }
+        if (c == 'W' || c == 'x' || c == 'y') {
+            ungetc(c, f);
+            break;
+        }
+        if (!(c == '-' || c == '.' || (c >= '0' && c <= '9'))) continue;
+        ungetc(c, f);
+        if (fscanf(f, "%f", &dst[got]) != 1) return 0;
+        got++;
+    }
+    return got == n;
+}
+
+static int load_linear_16x64_golden(float *W, float *x, float *y_gold, int n_out, int n_in) {
+    if (!LLM_GOLDEN_DIR[0]) return 0;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/linear_16x64.txt", LLM_GOLDEN_DIR);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[256];
+    int section = 0; /* 1=W 2=x 3=y */
+    int ok = 1;
+    while (ok && fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        if (strncmp(line, "W", 1) == 0 && (line[1] == '\n' || line[1] == '\0' || line[1] == '\r')) {
+            ok = load_floats_block(f, W, n_out * n_in);
+            section = 1;
+            continue;
+        }
+        if (line[0] == 'x' && (line[1] == '\n' || line[1] == '\0' || line[1] == '\r')) {
+            ok = load_floats_block(f, x, n_in);
+            section = 2;
+            continue;
+        }
+        if (line[0] == 'y' && (line[1] == '\n' || line[1] == '\0' || line[1] == '\r')) {
+            ok = load_floats_block(f, y_gold, n_out);
+            section = 3;
+            continue;
+        }
+    }
+    fclose(f);
+    return ok && section == 3;
+}
+
+/* Intern 16x64 then GEMV. Under PIM this is the MMIO/host planner path vs
+ * llm_infer/c/tests/golden/linear_16x64.txt (CPU dump); FP16 MAC uses slack. */
+static void test_linear_16x64_intern(void) {
+    const int n_out = 16, n_in = 64;
+    float *W = malloc((size_t)n_out * (size_t)n_in * sizeof(float));
+    float *x = malloc((size_t)n_in * sizeof(float));
+    float *y = malloc((size_t)n_out * sizeof(float));
+    float *ref = malloc((size_t)n_out * sizeof(float));
+    float *gold = malloc((size_t)n_out * sizeof(float));
+    expect_eq(W && x && y && ref && gold, "alloc linear 16x64 intern");
+    if (!W || !x || !y || !ref || !gold) {
+        free(W);
+        free(x);
+        free(y);
+        free(ref);
+        free(gold);
+        return;
+    }
+    int from_golden = load_linear_16x64_golden(W, x, gold, n_out, n_in);
+    if (!from_golden) {
+        rng_state = 1u;
+        fill_rand(W, n_out * n_in);
+        fill_rand(x, n_in);
+    }
+    printf("linear intern 16x64 intern weights golden=%d\n", from_golden);
+    llm_backend_intern_weight_f16(W, (size_t)n_out * (size_t)n_in * sizeof(float));
+    printf("linear intern 16x64 gemv\n");
+    linear(W, x, y, n_out, n_in);
+    llm_backend_sync();
+    linear_ref(W, x, ref, n_out, n_in);
+    check_close_f16(y, ref, n_out, n_in, "linear intern 16x64 vs f32 ref");
+    if (from_golden)
+        check_close_f16(y, gold, n_out, n_in, "linear intern 16x64 vs golden");
+    printf("linear intern 16x64 backend=%s golden=%d\n", llm_backend_name(), from_golden);
+    free(W);
+    free(x);
+    free(y);
+    free(ref);
+    free(gold);
+}
+
 static void test_host_read_preserves_cpu_write(void) {
     const int n = 64;
     float *a = malloc((size_t)n * sizeof(float));
@@ -621,7 +723,21 @@ static void test_host_read_preserves_cpu_write(void) {
 }
 
 int main(void) {
-    llm_backend_set_threads(4);
+    /* gem5 SE stdout is not a TTY; without this the run looks frozen. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    const int smoke = env_truthy("LLM_TEST_LINEAR_SMOKE");
+    printf("test_linear start backend=%s smoke=%d\n", llm_backend_name(), smoke);
+    llm_backend_set_threads(smoke ? 1 : 4);
+    test_linear_16x64_intern();
+    if (smoke) {
+        if (fails) {
+            fprintf(stderr, "%d failure(s)\n", fails);
+            return 1;
+        }
+        printf("test_linear 16x64 intern ok\n");
+        return 0;
+    }
     const int n_ins[] = {960, 2560, 7, 64};
     for (int k = 0; k < 4; k++) {
         test_linear_shape(16, n_ins[k]);

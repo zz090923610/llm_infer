@@ -15,10 +15,10 @@ from .tokenizer import StreamDecoder, Tokenizer, apply_chat_template
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Chat with nanogpt-chat-q8_0.gguf (from-scratch NumPy)")
+    parser = argparse.ArgumentParser(description="Chat with SmolLM2-360M-Instruct (from-scratch NumPy)")
     parser.add_argument(
         "--model",
-        default=str(Path(__file__).resolve().parents[1] / "nanogpt-chat-q8_0.gguf"),
+        default=str(Path(__file__).resolve().parents[1] / "models" / "smollm2-360m-instruct-q8_0.gguf"),
     )
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--temp", type=float, default=0.8)
@@ -52,7 +52,7 @@ def main() -> None:
             continue
 
         history.append({"role": "user", "content": user})
-        full = apply_chat_template(history, add_generation_prompt=True)
+        full = apply_chat_template(history, add_generation_prompt=True, tokenizer=tok)
         ids = tok.encode(full, parse_special=True)
         # Reuse KV cache when the new prompt is a prefix continuation of what we fed.
         if cached_ids and ids[: len(cached_ids)] == cached_ids:

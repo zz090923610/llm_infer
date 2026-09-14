@@ -1,0 +1,9 @@
+model models/smollm2-360m-instruct-q8_0.gguf
+prompt Say hi in one word.
+temp 0
+top_k 1
+seed 1
+max_tokens 8
+tokens 56 69 7015 30
+text HUMP.
+logits_checksum 0xb937e205479fc299

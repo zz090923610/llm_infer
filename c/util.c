@@ -1,7 +1,42 @@
 #include "util.h"
 
+#include <stdlib.h>
+
+static int llm_step_quiet = 1; /* STEP logs off unless LLM_STEPS / llm_set_quiet(0) */
+static int llm_quiet_forced;
+static void *(*g_arena_alloc)(size_t) = NULL;
+
+void llm_set_arena_alloc(void *(*fn)(size_t)) { g_arena_alloc = fn; }
+
+void llm_set_quiet(int quiet) {
+    llm_step_quiet = quiet ? 1 : 0;
+    llm_quiet_forced = 1;
+}
+
+int llm_steps_enabled(void) {
+    static int env_done;
+    if (!env_done) {
+        env_done = 1;
+        if (!llm_quiet_forced) {
+            const char *q = getenv("LLM_QUIET");
+            if (q && q[0] && q[0] != '0') {
+                llm_step_quiet = 1;
+            } else {
+                const char *s = getenv("LLM_STEPS");
+                if (s && s[0] && s[0] != '0') llm_step_quiet = 0;
+            }
+        }
+    }
+    return !llm_step_quiet;
+}
+
 void *xmalloc(size_t n) {
     if (n == 0) n = 1;
+    if (g_arena_alloc) {
+        void *p = g_arena_alloc(n);
+        if (!p) die("out of arena memory (%zu bytes)", n);
+        return p;
+    }
     void *p = malloc(n);
     if (!p) die("out of memory (%zu bytes)", n);
     return p;
@@ -9,6 +44,13 @@ void *xmalloc(size_t n) {
 
 void *xcalloc(size_t n, size_t sz) {
     if (n == 0) n = 1;
+    if (g_arena_alloc) {
+        size_t bytes = n * sz;
+        if (sz && bytes / sz != n) die("calloc overflow");
+        void *p = g_arena_alloc(bytes ? bytes : 1);
+        if (!p) die("out of arena memory (%zu * %zu)", n, sz);
+        return p;
+    }
     void *p = calloc(n, sz);
     if (!p) die("out of memory (%zu * %zu)", n, sz);
     return p;
@@ -16,6 +58,12 @@ void *xcalloc(size_t n, size_t sz) {
 
 void *xrealloc(void *p, size_t n) {
     if (n == 0) n = 1;
+    if (g_arena_alloc) {
+        void *q = g_arena_alloc(n);
+        if (!q) die("out of arena memory (%zu bytes)", n);
+        if (p) memcpy(q, p, n); /* old size unknown; copy n bytes is wrong if grow, OK if bump unused */
+        return q;
+    }
     void *q = realloc(p, n);
     if (!q) die("out of memory (%zu bytes)", n);
     return q;

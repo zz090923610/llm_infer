@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 #ifndef LLM_DEFAULT_MODEL
-#define LLM_DEFAULT_MODEL "../nanogpt-chat-q8_0.gguf"
+#define LLM_DEFAULT_MODEL "models/smollm2-360m-instruct-q8_0.gguf"
 #endif
 
 static int file_exists(const char *path) {
@@ -34,10 +34,10 @@ int main(void) {
 
     int has_eos = 0, has_end = 0, has_gend = 0;
     int end_id = -1, gend_id = -1, im_start = -1, im_end = -1;
-    hashmap_get(&tok->token_to_id, "END", &end_id);
-    hashmap_get(&tok->token_to_id, "ĠEND", &gend_id);
-    hashmap_get(&tok->token_to_id, "<|im_start|>", &im_start);
-    hashmap_get(&tok->token_to_id, "<|im_end|>", &im_end);
+    strmap_get(&tok->token_to_id, "END", &end_id);
+    strmap_get(&tok->token_to_id, "ĠEND", &gend_id);
+    strmap_get(&tok->token_to_id, "<|im_start|>", &im_start);
+    strmap_get(&tok->token_to_id, "<|im_end|>", &im_end);
     for (int i = 0; i < tok->n_stop; i++) {
         if (tok->stop_ids[i] == tok->hparams.eos_id) has_eos = 1;
         if (tok->stop_ids[i] == end_id) has_end = 1;

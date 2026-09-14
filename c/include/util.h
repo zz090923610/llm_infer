@@ -12,9 +12,23 @@
 #define LLM_OK 0
 #define LLM_ERR 1
 
+void llm_set_quiet(int quiet);
+int llm_steps_enabled(void);
+
+/* Unbuffered progress for gem5 SE / slow hosts. Off by default.
+   Enable with LLM_STEPS=1 or --steps; force off with --quiet / LLM_QUIET. */
+#define LLM_STEP(...)                          \
+    do {                                       \
+        if (llm_steps_enabled()) {             \
+            printf("STEP: " __VA_ARGS__);      \
+            fflush(stdout);                    \
+        }                                      \
+    } while (0)
+
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t sz);
 void *xrealloc(void *p, size_t n);
+void llm_set_arena_alloc(void *(*fn)(size_t));
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
 void die(const char *fmt, ...);

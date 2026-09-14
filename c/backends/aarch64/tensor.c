@@ -104,6 +104,28 @@ static void linear_rows_range(const float *W, const float *x, float *y, int n_to
             float32x4_t a2 = vdupq_n_f32(0.0f);
             float32x4_t a3 = vdupq_n_f32(0.0f);
             int j = 0;
+            for (; j + 16 <= n_in; j += 16) {
+                float32x4_t vw0 = vld1q_f32(w + j);
+                float32x4_t vw1 = vld1q_f32(w + j + 4);
+                float32x4_t vw2 = vld1q_f32(w + j + 8);
+                float32x4_t vw3 = vld1q_f32(w + j + 12);
+                a0 = vfmaq_f32(a0, vw0, vld1q_f32(x0 + j));
+                a1 = vfmaq_f32(a1, vw0, vld1q_f32(x1 + j));
+                a2 = vfmaq_f32(a2, vw0, vld1q_f32(x2 + j));
+                a3 = vfmaq_f32(a3, vw0, vld1q_f32(x3 + j));
+                a0 = vfmaq_f32(a0, vw1, vld1q_f32(x0 + j + 4));
+                a1 = vfmaq_f32(a1, vw1, vld1q_f32(x1 + j + 4));
+                a2 = vfmaq_f32(a2, vw1, vld1q_f32(x2 + j + 4));
+                a3 = vfmaq_f32(a3, vw1, vld1q_f32(x3 + j + 4));
+                a0 = vfmaq_f32(a0, vw2, vld1q_f32(x0 + j + 8));
+                a1 = vfmaq_f32(a1, vw2, vld1q_f32(x1 + j + 8));
+                a2 = vfmaq_f32(a2, vw2, vld1q_f32(x2 + j + 8));
+                a3 = vfmaq_f32(a3, vw2, vld1q_f32(x3 + j + 8));
+                a0 = vfmaq_f32(a0, vw3, vld1q_f32(x0 + j + 12));
+                a1 = vfmaq_f32(a1, vw3, vld1q_f32(x1 + j + 12));
+                a2 = vfmaq_f32(a2, vw3, vld1q_f32(x2 + j + 12));
+                a3 = vfmaq_f32(a3, vw3, vld1q_f32(x3 + j + 12));
+            }
             for (; j + 8 <= n_in; j += 8) {
                 float32x4_t vw0 = vld1q_f32(w + j);
                 float32x4_t vw1 = vld1q_f32(w + j + 4);

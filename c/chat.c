@@ -12,13 +12,14 @@ static double monotonic_now(void) {
 }
 
 #ifndef LLM_DEFAULT_MODEL
-#define LLM_DEFAULT_MODEL "../nanogpt-chat-q8_0.gguf"
+#define LLM_DEFAULT_MODEL "models/smollm2-360m-instruct-q8_0.gguf"
 #endif
 
 static void usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--max-tokens N] [--temp F] [--top-p F] [--top-k N] [--ctx N] "
-            "[--think] [--threads N] [--prefill-threads N] [--decode-threads N]\n",
+            "[--think] [--threads N] [--prefill-threads N] [--decode-threads N] [--tok-tables PATH] "
+            "[--quiet] [--steps]\n",
             argv0);
 }
 
@@ -44,6 +45,10 @@ static int prefix_equal(const int *a, int na, const int *b, int nb) {
 }
 
 int main(int argc, char **argv) {
+    /* Unbuffered so load/token lines reach gem5 logs before SE exit. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     const char *model_path = LLM_DEFAULT_MODEL;
     int max_tokens = 256;
     float temp = 0.8f;
@@ -55,6 +60,7 @@ int main(int argc, char **argv) {
     int n_decode = 0;
     int enable_thinking = 0;
     int set_temp = 0, set_top_p = 0, set_top_k = 0;
+    const char *tok_tables = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
@@ -73,6 +79,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) n_threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--prefill-threads") == 0 && i + 1 < argc) n_prefill = atoi(argv[++i]);
         else if (strcmp(argv[i], "--decode-threads") == 0 && i + 1 < argc) n_decode = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--tok-tables") == 0 && i + 1 < argc) tok_tables = argv[++i];
+        else if (strcmp(argv[i], "--quiet") == 0) llm_set_quiet(1);
+        else if (strcmp(argv[i], "--steps") == 0) llm_set_quiet(0);
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -86,17 +95,27 @@ int main(int argc, char **argv) {
     if (n_prefill > 0) llm_backend_set_prefill_threads(n_prefill);
     if (n_decode > 0) llm_backend_set_decode_threads(n_decode);
 
-    printf("loading %s\n", model_path);
     {
+        const char *q = getenv("LLM_QUIET");
+        if (q && q[0] && q[0] != '0') llm_set_quiet(1);
+    }
+
+    if (llm_steps_enabled()) {
+        printf("loading %s\n", model_path);
         int np = llm_backend_n_prefill_threads();
         int nd = llm_backend_n_decode_threads();
         if (np == nd) printf("  backend %s, %d thread(s)\n", llm_backend_name(), np);
         else printf("  backend %s, %d prefill / %d decode thread(s)\n", llm_backend_name(), np, nd);
+        fflush(stdout);
     }
-    fflush(stdout);
-    LoadedModel *loaded = load_model(model_path, 1, 1);
+    LoadedModel *loaded = load_model(model_path, 1, llm_steps_enabled());
+    LLM_STEP("weights loaded, init model graph\n");
     LlamaModel *model = llama_model_init(loaded);
-    Tokenizer *tok = tokenizer_from_gguf(loaded->gguf, &loaded->hparams);
+    LLM_STEP("model init done layers=%d embd=%d vocab=%d\n",
+             model->hparams.n_layer, model->hparams.n_embd, model->hparams.n_vocab);
+    LLM_STEP("build tokenizer tables=%s\n", tok_tables ? tok_tables : "(in-guest)");
+    Tokenizer *tok = tokenizer_from_gguf_ex(loaded->gguf, &loaded->hparams, tok_tables);
+    LLM_STEP("tokenizer ready vocab=%d\n", tok->n_vocab);
     tok->hparams.enable_thinking = enable_thinking;
     if (tok->hparams.arch == LLM_ARCH_QWEN2 || tok->hparams.arch == LLM_ARCH_QWEN35) {
         /* Qwen3 non-thinking defaults. Unconstrained 0.8/0.9 sampling repeats and derails. */
@@ -104,7 +123,9 @@ int main(int argc, char **argv) {
         if (!set_top_p) top_p = 0.8f;
         if (!set_top_k) top_k = 20;
     }
+    LLM_STEP("alloc kv cache ctx=%d\n", ctx);
     KVCache *cache = llama_model_new_cache(model, 1, ctx);
+    LLM_STEP("kv cache ready\n");
 
     ChatMessage *history = NULL;
     int nh = 0, hcap = 0;
@@ -170,6 +191,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        LLM_STEP("chat turn prompt_tokens=%d max_tokens=%d\n", n_prompt, max_tokens);
         fputs("Assistant: ", stdout);
         fflush(stdout);
         StreamDecoder dec;
