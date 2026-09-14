@@ -3,8 +3,8 @@
 
 set(_PIM_FUNC_DIR "")
 foreach(_cand
-        "${LLM_C_DIR}/../../pim_func"
         "${LLM_C_DIR}/../pim_func"
+        "${LLM_C_DIR}/../../pim_func"
         "${LLM_C_DIR}/../../gem5_se/pim_func")
   get_filename_component(_abs "${_cand}" ABSOLUTE)
   if(EXISTS "${_abs}/CMakeLists.txt")
@@ -14,7 +14,7 @@ foreach(_cand
 endforeach()
 if(NOT _PIM_FUNC_DIR)
   message(FATAL_ERROR
-          "LLM_BACKEND=pim needs pim_func. Tried next to gem5_se or under gem5_se/")
+          "LLM_BACKEND=pim needs pim_func. Expected ${LLM_C_DIR}/../pim_func")
 endif()
 
 if(NOT TARGET pim_func)

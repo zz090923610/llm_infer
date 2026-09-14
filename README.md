@@ -21,7 +21,7 @@ sudo apt install libvulkan-dev
 sudo apt install python3 python3-numpy
 ```
 
-`pim` is not an apt package: CMake looks for `pim_func` next to this repo or under `gem5_se/`. Android needs the NDK (`ANDROID_NDK`), not apt.
+`pim` ships in-tree at `pim_func/`. Android needs the NDK (`ANDROID_NDK`), not apt.
 
 ## Build (host, no gem5)
 
@@ -39,7 +39,7 @@ Default `LLM_BACKEND=all` suffixes binaries (`generate-plain-cpu`, `chat-x86_64-
 | `all` (default) | all available | `chat-<be>`, `generate-<be>`, `test_*-<be>` |
 | `plain-cpu` | scalar C (`c/backends/host/pc/plain-cpu`) | unsuffixed `chat`, `generate`, … |
 | `x86_64-simd` | AVX2/FMA + pthread pool (`c/backends/host/pc/x86_64-simd`) | unsuffixed |
-| `pim` | decode GEMV via `pim_func` (attn/RoPE/prefill still x86 kernels on this host; `c/backends/pim`) | unsuffixed |
+| `pim` | decode GEMV via in-tree `pim_func/` (attn/RoPE/prefill still x86 kernels on this host; `c/backends/pim`) | unsuffixed |
 | `gpu` | Vulkan (`c/backends/host/android/gpu`) | unsuffixed |
 | `aarch64-simd` | NEON (`c/backends/host/android/aarch64-simd`; this host or Android NDK) | unsuffixed |
 

@@ -65,12 +65,13 @@ set(LLM_CORE_SOURCES
 function(llm_find_pim_func out_var)
   set(_dir "")
   foreach(_cand
-          "${LLM_C_DIR}/../../pim_func"
           "${LLM_C_DIR}/../pim_func"
+          "${LLM_C_DIR}/../../pim_func"
           "${LLM_C_DIR}/../../gem5_se/pim_func")
     get_filename_component(_abs "${_cand}" ABSOLUTE)
     if(EXISTS "${_abs}/CMakeLists.txt")
       set(_dir "${_abs}")
+      message(STATUS "pim_func: ${_abs}")
       break()
     endif()
   endforeach()

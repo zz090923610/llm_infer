@@ -744,7 +744,7 @@ Core: `util.c`, `hashmap.c`, `heap.c`, `quant.c`, `gguf.c`, `unicode.c`, `unicod
 | --- | --- | --- |
 | `plain-cpu` | `c/backends/host/pc/plain-cpu/{backend,tensor,rope,attn}.c` | Scalar reference |
 | `x86_64-simd` | `c/backends/host/pc/x86_64-simd/*` | AVX2/FMA + pool |
-| `pim` | `c/backends/pim/*` + `pim_func` | Decode GEMV on Device; host default `PIM_ISSUE=host` |
+| `pim` | `c/backends/pim/*` + in-tree `pim_func/` | Decode GEMV on Device; host default `PIM_ISSUE=host` |
 | `aarch64-simd` | `c/backends/host/android/aarch64-simd/*` | NEON + pool (Android NDK) |
 | `gpu` | `c/backends/host/android/gpu/*` | Vulkan |
 | `all` | every available | Suffixed bins: `generate-plain-cpu`, `test_linear-pim`, … |
@@ -801,6 +801,7 @@ The process still needs ~1.35 GiB free RAM for f32 weights, plus the KV cache.
 | `c/include/attn.h` + `c/backends/host/pc/plain-cpu/attn.c` | GQA attention, head pack/merge, KV store |
 | `c/backends/host/pc/x86_64-simd/` | AVX2 linear/attn/RoPE + pthread pool |
 | `c/backends/pim/` | GEMV planner + intern; host Device or gem5 issue |
+| `pim_func/` | In-tree Device / issue library used by the PIM backend |
 | `c/backends/host/android/aarch64-simd/` | NEON linear + pthread pool |
 | `c/backends/host/android/gpu/` | Vulkan compute |
 | `c/include/cache.h` + `c/cache.c` | K/V arena + `n_seq` |
