@@ -4,6 +4,25 @@ From-scratch **Llama / SmolLM2-360M Instruct** inference in C (`c/`), with a Num
 
 Walkthrough of the model and code: [LEARN.md](LEARN.md).
 
+## Dependencies (Debian / Ubuntu)
+
+Host C (`plain-cpu`, `x86_64-simd`):
+
+```bash
+sudo apt install build-essential cmake
+```
+
+Optional:
+
+```bash
+# gpu backend (Vulkan headers + loader)
+sudo apt install libvulkan-dev
+# Python twin
+sudo apt install python3 python3-numpy
+```
+
+`pim` is not an apt package: CMake looks for `pim_func` next to this repo or under `gem5_se/`. Android needs the NDK (`ANDROID_NDK`), not apt.
+
 ## Build (host, no gem5)
 
 One configure from the repo root fills the top-level `build/` dir with every backend this machine can compile:
